@@ -157,10 +157,10 @@ async function pollJob(backend, jobId) {
     setStatus(`Status: ${data.status || 'processing'}... (${i * 5}s elapsed)`);
 
     if (data.status === 'completed' || data.status === 'succeeded') {
-      const url = data.unsigned_urls?.[0] || data.output?.[0]?.url || data.video_url;
-      if (!url) throw new Error('Job completed but no video URL was returned.');
-      return url;
+      // Route through our backend proxy so the auth header can be attached server-side
+      return `${backend}/api/video/${jobId}`;
     }
+
     if (data.status === 'failed' || data.status === 'error') {
       throw new Error(data.error?.message || 'Video generation failed.');
     }

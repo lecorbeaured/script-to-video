@@ -88,8 +88,35 @@ app.post('/api/generate', async (req, res) => {
   }
 });
 
+// Proxy video content — the browser can't attach the OpenRouter auth header itself,
+// so we fetch it here (with auth) and stream it straight through.
+app.get('/api/video/:jobId', async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const index = req.query.index || '0';
+
+    const upstream = await fetch(
+      `${OR_BASE}/videos/${jobId}/content?index=${index}`,
+      { headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}` } }
+    );
+
+    if (!upstream.ok) {
+      const errText = await upstream.text();
+      console.error('video proxy error:', upstream.status, errText);
+      return res.status(upstream.status).send(errText);
+    }
+
+    res.set('Content-Type', upstream.headers.get('content-type') || 'video/mp4');
+    upstream.body.pipe(res);
+  } catch (err) {
+    console.error('video proxy error:', err);
+    res.status(500).json({ error: 'Failed to proxy video content' });
+  }
+});
+
 // Poll job status
 app.get('/api/status/:jobId', async (req, res) => {
+
   try {
     const { jobId } = req.params;
     const r = await fetch(`${OR_BASE}/videos/${jobId}`, { headers: orHeaders() });
