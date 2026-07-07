@@ -24,7 +24,7 @@
     justify-content: center;
     padding: 32px 16px;
   }
-  .wrap { width: 100%; max-width: 640px; }
+  .wrap { width: 100%; max-width: 720px; }
   h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
   p.sub { color: var(--muted); margin-top: 0; font-size: 14px; }
   textarea {
@@ -39,6 +39,7 @@
     resize: vertical;
     font-family: inherit;
   }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
   .row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
   select, input[type=text] {
     background: var(--panel);
@@ -61,18 +62,58 @@
     width: 100%;
   }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .status {
-    margin-top: 16px;
-    font-size: 14px;
+  button.secondary {
+    background: transparent;
     color: var(--muted);
-    min-height: 20px;
-  }
-  video {
-    width: 100%;
-    margin-top: 16px;
-    border-radius: 10px;
     border: 1px solid var(--border);
+    font-weight: 500;
+    padding: 8px 14px;
+    width: auto;
+    margin-top: 0;
+    font-size: 13px;
   }
+  .section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 32px;
+    margin-bottom: 8px;
+  }
+  .section-header h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 0; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+  }
+  .card .script-snippet {
+    font-size: 13px;
+    color: var(--text);
+    margin: 0 0 8px 0;
+    max-height: 60px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .card .card-status {
+    font-size: 12px;
+    color: var(--muted);
+    margin-bottom: 8px;
+  }
+  .card video {
+    width: 100%;
+    border-radius: 8px;
+    display: block;
+    margin-bottom: 8px;
+  }
+  .card .card-actions { display: flex; gap: 8px; }
+  .card .card-actions button { margin-top: 0; }
+  .error { color: #f87171; }
+  .empty { color: var(--muted); font-size: 13px; }
   .settings {
     margin-top: 24px;
     padding-top: 16px;
@@ -80,15 +121,15 @@
   }
   .settings summary { cursor: pointer; color: var(--muted); font-size: 13px; }
   .settings input { width: 100%; margin-top: 8px; }
-  .error { color: #f87171; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>Script → Video</h1>
-  <p class="sub">Drop your script, pick a model, generate.</p>
+  <p class="sub">Drop your script(s), pick a model, generate.</p>
 
-  <textarea id="script" placeholder="Paste your script or prompt here..."></textarea>
+  <textarea id="script" placeholder="Paste one script per line. Multiple lines = batch generate."></textarea>
+  <div class="hint">One line = one video. Multiple lines submit as a batch, each becomes its own card below.</div>
 
   <div class="row">
     <select id="model">
@@ -110,10 +151,15 @@
     </select>
   </div>
 
-  <button id="generateBtn">Generate Video</button>
-
+  <button id="generateBtn">Generate Video(s)</button>
   <div class="status" id="status"></div>
-  <video id="result" controls style="display:none;"></video>
+
+  <div class="section-header">
+    <h2>Results</h2>
+    <button class="secondary" id="clearBtn">Clear history</button>
+  </div>
+  <div class="grid" id="grid"></div>
+  <p class="empty" id="emptyMsg">No videos yet — generate one above.</p>
 
   <details class="settings">
     <summary>Backend URL</summary>
@@ -124,11 +170,14 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
-const videoEl = $('result');
 const generateBtn = $('generateBtn');
 const backendUrlInput = $('backendUrl');
+const grid = $('grid');
+const emptyMsg = $('emptyMsg');
+const clearBtn = $('clearBtn');
 
-// Persist backend URL in localStorage (this is a plain deployed static site, not a sandboxed artifact)
+const HISTORY_KEY = 'stv_history';
+
 backendUrlInput.value = localStorage.getItem('backendUrl') || '';
 backendUrlInput.addEventListener('change', () => {
   localStorage.setItem('backendUrl', backendUrlInput.value.trim());
@@ -142,10 +191,106 @@ function getBackendUrl() {
 
 function setStatus(msg, isError = false) {
   statusEl.textContent = msg;
-  statusEl.className = isError ? 'status error' : 'status';
+  statusEl.style.color = isError ? '#f87171' : 'var(--muted)';
 }
 
-async function pollJob(backend, jobId) {
+function loadHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(items) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
+}
+
+function renderGrid() {
+  const items = loadHistory();
+  grid.innerHTML = '';
+  emptyMsg.style.display = items.length ? 'none' : 'block';
+
+  // newest first
+  [...items].reverse().forEach((item) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+
+    const snippet = document.createElement('p');
+    snippet.className = 'script-snippet';
+    snippet.textContent = item.script.length > 100 ? item.script.slice(0, 100) + '...' : item.script;
+    card.appendChild(snippet);
+
+    const statusLine = document.createElement('div');
+    statusLine.className = 'card-status';
+    statusLine.textContent = item.status === 'done' ? 'Done' : item.status === 'error' ? `Error: ${item.error || ''}` : `Status: ${item.status}`;
+    card.appendChild(statusLine);
+
+    if (item.status === 'done' && item.videoUrl) {
+      const video = document.createElement('video');
+      video.src = item.videoUrl;
+      video.controls = true;
+      card.appendChild(video);
+
+      const actions = document.createElement('div');
+      actions.className = 'card-actions';
+
+      const downloadBtn = document.createElement('button');
+      downloadBtn.className = 'secondary';
+      downloadBtn.textContent = 'Download';
+      downloadBtn.addEventListener('click', async () => {
+        downloadBtn.textContent = 'Downloading...';
+        try {
+          const res = await fetch(item.videoUrl);
+          const blob = await res.blob();
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = `${item.jobId || 'video'}.mp4`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(blobUrl);
+        } catch (err) {
+          console.error(err);
+        } finally {
+          downloadBtn.textContent = 'Download';
+        }
+      });
+      actions.appendChild(downloadBtn);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'secondary';
+      removeBtn.textContent = 'Remove';
+      removeBtn.addEventListener('click', () => {
+        const all = loadHistory().filter((h) => h.id !== item.id);
+        saveHistory(all);
+        renderGrid();
+      });
+      actions.appendChild(removeBtn);
+
+      card.appendChild(actions);
+    }
+
+    grid.appendChild(card);
+  });
+}
+
+clearBtn.addEventListener('click', () => {
+  saveHistory([]);
+  renderGrid();
+});
+
+function upsertHistoryItem(item) {
+  const items = loadHistory();
+  const idx = items.findIndex((h) => h.id === item.id);
+  if (idx >= 0) items[idx] = item;
+  else items.push(item);
+  saveHistory(items);
+  renderGrid();
+}
+
+async function pollJob(backend, jobId, onTick) {
   const maxAttempts = 60; // ~5 min at 5s intervals
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise((r) => setTimeout(r, 5000));
@@ -154,13 +299,11 @@ async function pollJob(backend, jobId) {
 
     if (!res.ok) throw new Error(data.error?.message || data.error || 'Status check failed');
 
-    setStatus(`Status: ${data.status || 'processing'}... (${i * 5}s elapsed)`);
+    onTick(data.status || 'processing', i * 5);
 
     if (data.status === 'completed' || data.status === 'succeeded') {
-      // Route through our backend proxy so the auth header can be attached server-side
       return `${backend}/api/video/${jobId}`;
     }
-
     if (data.status === 'failed' || data.status === 'error') {
       throw new Error(data.error?.message || 'Video generation failed.');
     }
@@ -168,29 +311,16 @@ async function pollJob(backend, jobId) {
   throw new Error('Timed out waiting for video generation.');
 }
 
-generateBtn.addEventListener('click', async () => {
-  const script = $('script').value.trim();
-  if (!script) {
-    setStatus('Enter a script first.', true);
-    return;
-  }
-
-  videoEl.style.display = 'none';
-  generateBtn.disabled = true;
+async function generateOne(backend, script, opts) {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const baseItem = { id, script, status: 'submitting' };
+  upsertHistoryItem(baseItem);
 
   try {
-    const backend = getBackendUrl();
-    setStatus('Submitting job...');
-
     const submitRes = await fetch(`${backend}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        script,
-        model: $('model').value,
-        aspectRatio: $('aspect').value,
-        resolution: $('resolution').value,
-      }),
+      body: JSON.stringify({ script, ...opts }),
     });
     const submitData = await submitRes.json();
 
@@ -201,12 +331,43 @@ generateBtn.addEventListener('click', async () => {
     const jobId = submitData.id;
     if (!jobId) throw new Error('No job ID returned from backend.');
 
-    setStatus('Job submitted. Generating video (this can take 1-5 minutes)...');
-    const videoUrl = await pollJob(backend, jobId);
+    upsertHistoryItem({ id, script, jobId, status: 'processing' });
 
-    videoEl.src = videoUrl;
-    videoEl.style.display = 'block';
-    setStatus('Done.');
+    const videoUrl = await pollJob(backend, jobId, (status) => {
+      upsertHistoryItem({ id, script, jobId, status });
+    });
+
+    upsertHistoryItem({ id, script, jobId, status: 'done', videoUrl });
+  } catch (err) {
+    console.error(err);
+    upsertHistoryItem({ id, script, status: 'error', error: err.message });
+  }
+}
+
+generateBtn.addEventListener('click', async () => {
+  const raw = $('script').value;
+  const scripts = raw.split('\n').map((s) => s.trim()).filter(Boolean);
+
+  if (!scripts.length) {
+    setStatus('Enter at least one script.', true);
+    return;
+  }
+
+  generateBtn.disabled = true;
+  try {
+    const backend = getBackendUrl();
+    const opts = {
+      model: $('model').value,
+      aspectRatio: $('aspect').value,
+      resolution: $('resolution').value,
+    };
+
+    setStatus(`Submitting ${scripts.length} job${scripts.length > 1 ? 's' : ''}...`);
+
+    // Fire all jobs in parallel — each tracks its own card independently
+    await Promise.all(scripts.map((script) => generateOne(backend, script, opts)));
+
+    setStatus('All jobs finished.');
   } catch (err) {
     console.error(err);
     setStatus(err.message || 'Something went wrong.', true);
@@ -214,6 +375,8 @@ generateBtn.addEventListener('click', async () => {
     generateBtn.disabled = false;
   }
 });
+
+renderGrid();
 </script>
 </body>
 </html>
