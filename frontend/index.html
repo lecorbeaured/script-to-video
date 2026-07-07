@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="icon" type="image/svg+xml" href="favicon.svg" />
+<title>Script to Video</title>
+<style>
+  :root {
+    --bg: #0b0b0f;
+    --panel: #17171d;
+    --border: #2a2a33;
+    --accent: #6ee7b7;
+    --text: #e8e8ee;
+    --muted: #9a9aa5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: flex;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .wrap { width: 100%; max-width: 640px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  p.sub { color: var(--muted); margin-top: 0; font-size: 14px; }
+  textarea {
+    width: 100%;
+    min-height: 160px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    color: var(--text);
+    padding: 14px;
+    font-size: 15px;
+    resize: vertical;
+    font-family: inherit;
+  }
+  .row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  select, input[type=text] {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 14px;
+  }
+  button {
+    background: var(--accent);
+    color: #05130d;
+    border: none;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 15px;
+    cursor: pointer;
+    margin-top: 16px;
+    width: 100%;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .status {
+    margin-top: 16px;
+    font-size: 14px;
+    color: var(--muted);
+    min-height: 20px;
+  }
+  video {
+    width: 100%;
+    margin-top: 16px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  .settings {
+    margin-top: 24px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+  }
+  .settings summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .settings input { width: 100%; margin-top: 8px; }
+  .error { color: #f87171; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Script → Video</h1>
+  <p class="sub">Drop your script, pick a model, generate.</p>
+
+  <textarea id="script" placeholder="Paste your script or prompt here..."></textarea>
+
+  <div class="row">
+    <select id="model">
+      <option value="google/veo-3.1-lite">Veo 3.1 Lite (cheapest)</option>
+      <option value="google/veo-3.1-fast">Veo 3.1 Fast</option>
+      <option value="google/veo-3.1">Veo 3.1</option>
+      <option value="bytedance/seedance-2.0-fast">Seedance 2.0 Fast</option>
+      <option value="bytedance/seedance-2.0">Seedance 2.0</option>
+      <option value="alibaba/wan-2.7">Wan 2.7</option>
+    </select>
+    <select id="aspect">
+      <option value="9:16">9:16 (vertical)</option>
+      <option value="16:9">16:9 (horizontal)</option>
+      <option value="1:1">1:1 (square)</option>
+    </select>
+    <select id="resolution">
+      <option value="720p">720p</option>
+      <option value="1080p">1080p</option>
+    </select>
+  </div>
+
+  <button id="generateBtn">Generate Video</button>
+
+  <div class="status" id="status"></div>
+  <video id="result" controls style="display:none;"></video>
+
+  <details class="settings">
+    <summary>Backend URL</summary>
+    <input type="text" id="backendUrl" placeholder="https://your-backend.up.railway.app" />
+  </details>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const statusEl = $('status');
+const videoEl = $('result');
+const generateBtn = $('generateBtn');
+const backendUrlInput = $('backendUrl');
+
+// Persist backend URL in localStorage (this is a plain deployed static site, not a sandboxed artifact)
+backendUrlInput.value = localStorage.getItem('backendUrl') || '';
+backendUrlInput.addEventListener('change', () => {
+  localStorage.setItem('backendUrl', backendUrlInput.value.trim());
+});
+
+function getBackendUrl() {
+  const url = backendUrlInput.value.trim();
+  if (!url) throw new Error('Set your backend URL first (see "Backend URL" below the button).');
+  return url.replace(/\/$/, '');
+}
+
+function setStatus(msg, isError = false) {
+  statusEl.textContent = msg;
+  statusEl.className = isError ? 'status error' : 'status';
+}
+
+async function pollJob(backend, jobId) {
+  const maxAttempts = 60; // ~5 min at 5s intervals
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const res = await fetch(`${backend}/api/status/${jobId}`);
+    const data = await res.json();
+
+    if (!res.ok) throw new Error(data.error?.message || data.error || 'Status check failed');
+
+    setStatus(`Status: ${data.status || 'processing'}... (${i * 5}s elapsed)`);
+
+    if (data.status === 'completed' || data.status === 'succeeded') {
+      const url = data.unsigned_urls?.[0] || data.output?.[0]?.url || data.video_url;
+      if (!url) throw new Error('Job completed but no video URL was returned.');
+      return url;
+    }
+    if (data.status === 'failed' || data.status === 'error') {
+      throw new Error(data.error?.message || 'Video generation failed.');
+    }
+  }
+  throw new Error('Timed out waiting for video generation.');
+}
+
+generateBtn.addEventListener('click', async () => {
+  const script = $('script').value.trim();
+  if (!script) {
+    setStatus('Enter a script first.', true);
+    return;
+  }
+
+  videoEl.style.display = 'none';
+  generateBtn.disabled = true;
+
+  try {
+    const backend = getBackendUrl();
+    setStatus('Submitting job...');
+
+    const submitRes = await fetch(`${backend}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        script,
+        model: $('model').value,
+        aspectRatio: $('aspect').value,
+        resolution: $('resolution').value,
+      }),
+    });
+    const submitData = await submitRes.json();
+
+    if (!submitRes.ok) {
+      throw new Error(submitData.error?.message || JSON.stringify(submitData.error) || 'Submit failed');
+    }
+
+    const jobId = submitData.id;
+    if (!jobId) throw new Error('No job ID returned from backend.');
+
+    setStatus('Job submitted. Generating video (this can take 1-5 minutes)...');
+    const videoUrl = await pollJob(backend, jobId);
+
+    videoEl.src = videoUrl;
+    videoEl.style.display = 'block';
+    setStatus('Done.');
+  } catch (err) {
+    console.error(err);
+    setStatus(err.message || 'Something went wrong.', true);
+  } finally {
+    generateBtn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
