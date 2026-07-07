@@ -259,6 +259,48 @@ function renderGrid() {
       });
       actions.appendChild(downloadBtn);
 
+      const overlayBtn = document.createElement('button');
+      overlayBtn.className = 'secondary';
+      overlayBtn.textContent = 'Add text overlay';
+      overlayBtn.addEventListener('click', async () => {
+        const text = prompt('Text to burn onto the video:');
+        if (!text || !text.trim()) return;
+
+        overlayBtn.disabled = true;
+        overlayBtn.textContent = 'Rendering...';
+        try {
+          const backend = getBackendUrl();
+          const res = await fetch(`${backend}/api/overlay/${item.jobId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text.trim(), position: 'bottom' }),
+          });
+          if (!res.ok) {
+            const errData = await res.json().catch(() => ({}));
+            throw new Error(errData.error || 'Overlay render failed');
+          }
+          const blob = await res.blob();
+          const blobUrl = URL.createObjectURL(blob);
+
+          // Add as its own history entry so the original stays untouched
+          const newId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          upsertHistoryItem({
+            id: newId,
+            script: `${item.script} [+ text: "${text.trim()}"]`,
+            jobId: item.jobId,
+            status: 'done',
+            videoUrl: blobUrl,
+          });
+        } catch (err) {
+          console.error(err);
+          alert(err.message || 'Failed to add text overlay');
+        } finally {
+          overlayBtn.disabled = false;
+          overlayBtn.textContent = 'Add text overlay';
+        }
+      });
+      actions.appendChild(overlayBtn);
+
       const removeBtn = document.createElement('button');
       removeBtn.className = 'secondary';
       removeBtn.textContent = 'Remove';
