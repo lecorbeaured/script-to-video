@@ -16,9 +16,15 @@ app.use(cors({ origin: ALLOWED_ORIGIN }));
 
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const DEFAULT_MODEL = process.env.DEFAULT_VIDEO_MODEL || 'google/veo-3.1-lite';
+const DEFAULT_TEXT_MODEL = process.env.DEFAULT_TEXT_MODEL || 'deepseek/deepseek-chat';
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'; // default: Rachel
 
 if (!OPENROUTER_API_KEY) {
   console.warn('WARNING: OPENROUTER_API_KEY is not set. Set it in your environment / Railway variables.');
+}
+if (!ELEVENLABS_API_KEY) {
+  console.warn('WARNING: ELEVENLABS_API_KEY is not set. Story Mode voiceover will fail without it.');
 }
 
 const OR_BASE = 'https://openrouter.ai/api/v1';
@@ -28,6 +34,93 @@ function orHeaders() {
     Authorization: `Bearer ${OPENROUTER_API_KEY}`,
     'Content-Type': 'application/json',
   };
+}
+
+// Call an LLM via OpenRouter (used for prompt expansion + story beat-splitting)
+async function chatCompletion(systemPrompt, userPrompt, model = DEFAULT_TEXT_MODEL) {
+  const r = await fetch(`${OR_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: orHeaders(),
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    }),
+  });
+  const data = await r.json();
+  if (!r.ok) {
+    throw new Error(data.error?.message || JSON.stringify(data.error) || 'LLM call failed');
+  }
+  return data.choices?.[0]?.message?.content?.trim() || '';
+}
+
+// Generate narration audio via ElevenLabs, returns a Buffer of mp3 bytes
+async function elevenLabsTTS(text, voiceId = ELEVENLABS_VOICE_ID) {
+  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': ELEVENLABS_API_KEY,
+      'Content-Type': 'application/json',
+      Accept: 'audio/mpeg',
+    },
+    body: JSON.stringify({
+      text,
+      model_id: 'eleven_multilingual_v2',
+      voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+    }),
+  });
+  if (!r.ok) {
+    const errText = await r.text();
+    throw new Error(`ElevenLabs TTS failed: ${errText}`);
+  }
+  return r.buffer();
+}
+
+// Submit a video job to OpenRouter and poll until it's done, downloading the result to a local temp file.
+// Returns the local file path.
+async function generateVideoAndWait(prompt, opts, tempPath, maxAttempts = 60) {
+  const body = {
+    model: opts.model || DEFAULT_MODEL,
+    prompt,
+    aspect_ratio: opts.aspectRatio || '9:16',
+    resolution: opts.resolution || '720p',
+    generate_audio: false, // story mode supplies its own narration audio
+  };
+
+  const submitRes = await fetch(`${OR_BASE}/videos`, {
+    method: 'POST',
+    headers: orHeaders(),
+    body: JSON.stringify(body),
+  });
+  const submitData = await submitRes.json();
+  if (!submitRes.ok) {
+    throw new Error(submitData.error?.message || JSON.stringify(submitData.error) || 'Video submit failed');
+  }
+  const jobId = submitData.id;
+  if (!jobId) throw new Error('No job ID returned for video generation');
+
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const statusRes = await fetch(`${OR_BASE}/videos/${jobId}`, { headers: orHeaders() });
+    const statusData = await statusRes.json();
+    if (!statusRes.ok) throw new Error(statusData.error?.message || 'Status check failed');
+
+    if (statusData.status === 'completed' || statusData.status === 'succeeded') {
+      const contentRes = await fetch(`${OR_BASE}/videos/${jobId}/content?index=0`, {
+        headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}` },
+      });
+      if (!contentRes.ok) throw new Error('Failed to download completed video');
+      const buffer = await contentRes.buffer();
+      fs.writeFileSync(tempPath, buffer);
+      return tempPath;
+    }
+    if (statusData.status === 'failed' || statusData.status === 'error') {
+      throw new Error(statusData.error?.message || 'Video generation failed');
+    }
+  }
+  throw new Error('Timed out waiting for video generation');
 }
 
 // Health check
@@ -161,8 +254,8 @@ app.post('/api/overlay/:jobId', async (req, res) => {
     if (position === 'top') yExpr = '50';
     if (position === 'center') yExpr = '(h-text_h)/2';
 
-    const drawtext = [
-      `fontfile=${FONT_PATH}`,
+    const drawtext = 'drawtext=' + [
+      `fontfile='${FONT_PATH}'`,
       `text='${escapeDrawtext(text.trim())}'`,
       `fontsize=${fontSize}`,
       `fontcolor=white`,
@@ -211,6 +304,154 @@ app.get('/api/status/:jobId', async (req, res) => {
     console.error('status error:', err);
     res.status(500).json({ error: 'Failed to check job status' });
   }
+});
+
+// ── Prompt Expander ──
+// Turn a raw topic into a single well-formed 8-second cinematic prompt
+app.post('/api/prompt/expand', async (req, res) => {
+  try {
+    const { topic } = req.body;
+    if (!topic || !topic.trim()) {
+      return res.status(400).json({ error: 'topic is required' });
+    }
+
+    const systemPrompt = `You are a cinematic prompt writer for AI video generation models limited to 8 seconds of footage. Given a topic, write ONE single vivid cinematic prompt following this formula: [Subject] + [single action] + [setting] + [lighting/mood] + [camera behavior] + [style]. It must describe ONE beat only, not a sequence of events. Output ONLY the prompt text, nothing else — no quotes, no preamble, no labels.`;
+
+    const prompt = await chatCompletion(systemPrompt, topic.trim());
+    res.json({ prompt });
+  } catch (err) {
+    console.error('prompt expand error:', err);
+    res.status(500).json({ error: err.message || 'Failed to expand prompt' });
+  }
+});
+
+// ── Story Mode: Step 1 — split a narration into 8-second beats + matching visual prompts ──
+app.post('/api/story/beats', async (req, res) => {
+  try {
+    const { narration } = req.body;
+    if (!narration || !narration.trim()) {
+      return res.status(400).json({ error: 'narration is required' });
+    }
+
+    const systemPrompt = `You split a narration script into beats for an 8-second-per-clip AI video generator. Each beat's narration should be roughly 15-20 words (about 8 seconds of spoken audio at a natural pace). For each beat, also write ONE single vivid cinematic visual prompt (formula: [Subject] + [single action] + [setting] + [lighting/mood] + [camera behavior] + [style]) that matches what's being narrated at that moment — one beat only, not a sequence.
+
+Output STRICTLY a JSON array, nothing else, no markdown code fences, no preamble. Format:
+[{"narration": "...", "visualPrompt": "..."}, ...]`;
+
+    const raw = await chatCompletion(systemPrompt, narration.trim());
+    const cleaned = raw.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+    let beats;
+    try {
+      beats = JSON.parse(cleaned);
+    } catch (parseErr) {
+      console.error('Failed to parse beats JSON:', cleaned);
+      throw new Error('Could not parse story beats from the model response');
+    }
+    res.json({ beats });
+  } catch (err) {
+    console.error('story beats error:', err);
+    res.status(500).json({ error: err.message || 'Failed to split narration into beats' });
+  }
+});
+
+// ── Story Mode: Step 2 — generate all beats (video + voiceover), mux, and stitch ──
+const storyJobs = {}; // in-memory job store: storyId -> { status, beats: [{status}], finalPath, error }
+
+app.post('/api/story/generate', async (req, res) => {
+  const { beats, model, aspectRatio, resolution, voiceId } = req.body;
+
+  if (!Array.isArray(beats) || !beats.length) {
+    return res.status(400).json({ error: 'beats array is required' });
+  }
+
+  const storyId = crypto.randomBytes(8).toString('hex');
+  storyJobs[storyId] = {
+    status: 'processing',
+    beats: beats.map(() => ({ status: 'pending' })),
+    finalPath: null,
+    error: null,
+  };
+
+  res.json({ storyId });
+
+  // Process in the background — the response above already returned the storyId
+  (async () => {
+    const workDir = os.tmpdir();
+    const beatFinalPaths = [];
+
+    try {
+      for (let i = 0; i < beats.length; i++) {
+        const beat = beats[i];
+        storyJobs[storyId].beats[i].status = 'generating video';
+
+        const videoPath = path.join(workDir, `${storyId}-beat${i}-video.mp4`);
+        await generateVideoAndWait(beat.visualPrompt, { model, aspectRatio, resolution }, videoPath);
+
+        storyJobs[storyId].beats[i].status = 'generating voiceover';
+        const audioBuffer = await elevenLabsTTS(beat.narration, voiceId);
+        const audioPath = path.join(workDir, `${storyId}-beat${i}-audio.mp3`);
+        fs.writeFileSync(audioPath, audioBuffer);
+
+        storyJobs[storyId].beats[i].status = 'muxing';
+        const finalBeatPath = path.join(workDir, `${storyId}-beat${i}-final.mp4`);
+        await new Promise((resolve, reject) => {
+          ffmpeg(videoPath)
+            .input(audioPath)
+            .outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest'])
+            .on('error', reject)
+            .on('end', resolve)
+            .save(finalBeatPath);
+        });
+
+        beatFinalPaths.push(finalBeatPath);
+        storyJobs[storyId].beats[i].status = 'done';
+
+        fs.unlink(videoPath, () => {});
+        fs.unlink(audioPath, () => {});
+      }
+
+      // Concatenate all beats into one final video
+      const listPath = path.join(workDir, `${storyId}-concat-list.txt`);
+      const listContent = beatFinalPaths.map((p) => `file '${p}'`).join('\n');
+      fs.writeFileSync(listPath, listContent);
+
+      const finalPath = path.join(workDir, `${storyId}-final.mp4`);
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(listPath)
+          .inputOptions(['-f concat', '-safe 0'])
+          .outputOptions(['-c copy'])
+          .on('error', reject)
+          .on('end', resolve)
+          .save(finalPath);
+      });
+
+      storyJobs[storyId].status = 'done';
+      storyJobs[storyId].finalPath = finalPath;
+
+      beatFinalPaths.forEach((p) => fs.unlink(p, () => {}));
+      fs.unlink(listPath, () => {});
+    } catch (err) {
+      console.error('story generate error:', err);
+      storyJobs[storyId].status = 'error';
+      storyJobs[storyId].error = err.message || 'Story generation failed';
+    }
+  })();
+});
+
+app.get('/api/story/status/:storyId', (req, res) => {
+  const job = storyJobs[req.params.storyId];
+  if (!job) return res.status(404).json({ error: 'Story job not found' });
+  res.json({ status: job.status, beats: job.beats, error: job.error });
+});
+
+app.get('/api/story/video/:storyId', (req, res) => {
+  const job = storyJobs[req.params.storyId];
+  if (!job || job.status !== 'done' || !job.finalPath) {
+    return res.status(404).json({ error: 'Story video not ready' });
+  }
+  res.set('Content-Type', 'video/mp4');
+  fs.createReadStream(job.finalPath).pipe(res);
 });
 
 const PORT = process.env.PORT || 8787;

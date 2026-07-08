@@ -128,6 +128,11 @@
   <h1>Script → Video</h1>
   <p class="sub">Drop your script(s), pick a model, generate.</p>
 
+  <div class="row" style="margin-top:0;">
+    <input type="text" id="expandTopic" placeholder="Topic, e.g. 'tarot reading'" style="flex:1;" />
+    <button class="secondary" id="expandBtn" style="margin-top:0;">Expand to 8-sec script</button>
+  </div>
+
   <textarea id="script" placeholder="Paste one script per line. Multiple lines = batch generate."></textarea>
   <div class="hint">One line = one video. Multiple lines submit as a batch, each becomes its own card below.</div>
 
@@ -160,6 +165,17 @@
   </div>
   <div class="grid" id="grid"></div>
   <p class="empty" id="emptyMsg">No videos yet — generate one above.</p>
+
+  <div class="section-header">
+    <h2>Story Mode</h2>
+  </div>
+  <p class="hint" style="margin-top:0;">Write a full narration. It'll be split into 8-second beats, each rendered as its own clip with matching ElevenLabs voiceover, then stitched into one video.</p>
+  <textarea id="storyNarration" placeholder="Write your full story narration here..."></textarea>
+  <button class="secondary" id="splitBeatsBtn" style="width:auto;">Split into beats</button>
+
+  <div id="beatsEditor"></div>
+  <button id="generateStoryBtn" style="display:none;">Generate Full Story Video</button>
+  <div class="status" id="storyStatus"></div>
 
   <details class="settings">
     <summary>Backend URL</summary>
@@ -415,6 +431,174 @@ generateBtn.addEventListener('click', async () => {
     setStatus(err.message || 'Something went wrong.', true);
   } finally {
     generateBtn.disabled = false;
+  }
+});
+
+// ── Prompt Expander ──
+$('expandBtn').addEventListener('click', async () => {
+  const topic = $('expandTopic').value.trim();
+  if (!topic) return;
+
+  const btn = $('expandBtn');
+  btn.disabled = true;
+  btn.textContent = 'Expanding...';
+  try {
+    const backend = getBackendUrl();
+    const res = await fetch(`${backend}/api/prompt/expand`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to expand prompt');
+
+    const scriptEl = $('script');
+    scriptEl.value = scriptEl.value.trim()
+      ? scriptEl.value.trim() + '\n' + data.prompt
+      : data.prompt;
+    $('expandTopic').value = '';
+  } catch (err) {
+    alert(err.message || 'Failed to expand prompt');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Expand to 8-sec script';
+  }
+});
+
+// ── Story Mode ──
+let currentBeats = [];
+
+function renderBeatsEditor() {
+  const container = $('beatsEditor');
+  container.innerHTML = '';
+  if (!currentBeats.length) return;
+
+  currentBeats.forEach((beat, i) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.style.marginTop = '12px';
+
+    const label = document.createElement('div');
+    label.className = 'card-status';
+    label.textContent = `Beat ${i + 1}`;
+    card.appendChild(label);
+
+    const narrationLabel = document.createElement('div');
+    narrationLabel.className = 'hint';
+    narrationLabel.textContent = 'Narration:';
+    card.appendChild(narrationLabel);
+
+    const narrationInput = document.createElement('textarea');
+    narrationInput.style.minHeight = '50px';
+    narrationInput.value = beat.narration;
+    narrationInput.addEventListener('input', () => { currentBeats[i].narration = narrationInput.value; });
+    card.appendChild(narrationInput);
+
+    const visualLabel = document.createElement('div');
+    visualLabel.className = 'hint';
+    visualLabel.textContent = 'Visual prompt:';
+    card.appendChild(visualLabel);
+
+    const visualInput = document.createElement('textarea');
+    visualInput.style.minHeight = '50px';
+    visualInput.value = beat.visualPrompt;
+    visualInput.addEventListener('input', () => { currentBeats[i].visualPrompt = visualInput.value; });
+    card.appendChild(visualInput);
+
+    container.appendChild(card);
+  });
+
+  $('generateStoryBtn').style.display = 'block';
+}
+
+$('splitBeatsBtn').addEventListener('click', async () => {
+  const narration = $('storyNarration').value.trim();
+  if (!narration) {
+    setStatus('Write a narration first.', true);
+    return;
+  }
+
+  const btn = $('splitBeatsBtn');
+  btn.disabled = true;
+  btn.textContent = 'Splitting...';
+  try {
+    const backend = getBackendUrl();
+    const res = await fetch(`${backend}/api/story/beats`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ narration }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to split into beats');
+
+    currentBeats = data.beats;
+    renderBeatsEditor();
+  } catch (err) {
+    alert(err.message || 'Failed to split narration into beats');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Split into beats';
+  }
+});
+
+$('generateStoryBtn').addEventListener('click', async () => {
+  if (!currentBeats.length) return;
+
+  const storyStatus = $('storyStatus');
+  const btn = $('generateStoryBtn');
+  btn.disabled = true;
+
+  try {
+    const backend = getBackendUrl();
+    const submitRes = await fetch(`${backend}/api/story/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        beats: currentBeats,
+        model: $('model').value,
+        aspectRatio: $('aspect').value,
+        resolution: $('resolution').value,
+      }),
+    });
+    const submitData = await submitRes.json();
+    if (!submitRes.ok) throw new Error(submitData.error || 'Failed to start story generation');
+
+    const { storyId } = submitData;
+    storyStatus.style.color = 'var(--muted)';
+
+    const maxAttempts = 180; // up to ~15 min for a multi-beat story
+    for (let i = 0; i < maxAttempts; i++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      const statusRes = await fetch(`${backend}/api/story/status/${storyId}`);
+      const statusData = await statusRes.json();
+      if (!statusRes.ok) throw new Error(statusData.error || 'Status check failed');
+
+      const beatSummary = statusData.beats.map((b, idx) => `Beat ${idx + 1}: ${b.status}`).join(' | ');
+      storyStatus.textContent = beatSummary;
+
+      if (statusData.status === 'done') {
+        const videoUrl = `${backend}/api/story/video/${storyId}`;
+        const newId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        upsertHistoryItem({
+          id: newId,
+          script: `[Story] ${currentBeats.map((b) => b.narration).join(' ')}`,
+          jobId: null,
+          status: 'done',
+          videoUrl,
+        });
+        storyStatus.textContent = 'Story video done — see Results below.';
+        break;
+      }
+      if (statusData.status === 'error') {
+        throw new Error(statusData.error || 'Story generation failed');
+      }
+    }
+  } catch (err) {
+    console.error(err);
+    storyStatus.textContent = err.message || 'Something went wrong.';
+    storyStatus.style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
   }
 });
 
