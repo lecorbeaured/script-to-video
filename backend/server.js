@@ -453,6 +453,10 @@ app.post('/api/story/generate', async (req, res) => {
 
       // Mix in background music if one was uploaded for this story
       const musicPath = musicId ? musicFiles[musicId] : null;
+      if (musicId && !musicPath) {
+        console.warn(`Music requested (musicId=${musicId}) but file not found — likely lost to a server restart/redeploy since upload. Skipping music.`);
+        storyJobs[storyId].musicWarning = 'Background music was uploaded but could not be found when generating (the server may have restarted between upload and generation) — video was created without music.';
+      }
       if (musicPath && fs.existsSync(musicPath)) {
         const withMusicPath = path.join(workDir, `${storyId}-final.mp4`);
         await new Promise((resolve, reject) => {
@@ -490,7 +494,7 @@ app.post('/api/story/generate', async (req, res) => {
 app.get('/api/story/status/:storyId', (req, res) => {
   const job = storyJobs[req.params.storyId];
   if (!job) return res.status(404).json({ error: 'Story job not found' });
-  res.json({ status: job.status, beats: job.beats, error: job.error });
+  res.json({ status: job.status, beats: job.beats, error: job.error, musicWarning: job.musicWarning || null });
 });
 
 app.get('/api/story/video/:storyId', (req, res) => {

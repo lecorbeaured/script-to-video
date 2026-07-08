@@ -284,7 +284,8 @@ function renderGrid() {
       });
       actions.appendChild(downloadBtn);
 
-      const overlayBtn = document.createElement('button');
+      if (item.jobId) {
+        const overlayBtn = document.createElement('button');
       overlayBtn.className = 'secondary';
       overlayBtn.textContent = 'Add text overlay';
       overlayBtn.addEventListener('click', async () => {
@@ -325,6 +326,7 @@ function renderGrid() {
         }
       });
       actions.appendChild(overlayBtn);
+      }
 
       const removeBtn = document.createElement('button');
       removeBtn.className = 'secondary';
@@ -641,7 +643,10 @@ $('generateStoryBtn').addEventListener('click', async () => {
           status: 'done',
           videoUrl,
         });
-        storyStatus.textContent = 'Story video done — see Results below.';
+        storyStatus.textContent = statusData.musicWarning
+          ? `Story video done, but: ${statusData.musicWarning}`
+          : 'Story video done — see Results below.';
+        storyStatus.style.color = statusData.musicWarning ? '#f59e0b' : 'var(--muted)';
         break;
       }
       if (statusData.status === 'error') {
