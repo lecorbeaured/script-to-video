@@ -7,6 +7,9 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const ffmpeg = require('fluent-ffmpeg');
+const multer = require('multer');
+
+const upload = multer({ dest: os.tmpdir(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB cap
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -127,6 +130,19 @@ async function generateVideoAndWait(prompt, opts, tempPath, maxAttempts = 60) {
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ ok: true });
+});
+
+// Upload a background music track (mp3) for use in Story Mode
+const musicFiles = {}; // musicId -> file path
+app.post('/api/music/upload', upload.single('music'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No music file uploaded' });
+  }
+  const musicId = crypto.randomBytes(8).toString('hex');
+  const destPath = path.join(os.tmpdir(), `music-${musicId}.mp3`);
+  fs.renameSync(req.file.path, destPath);
+  musicFiles[musicId] = destPath;
+  res.json({ musicId });
 });
 
 // List available video models (resolutions, pricing, aspect ratios)
@@ -365,7 +381,7 @@ Output STRICTLY a JSON array, nothing else, no markdown code fences, no preamble
 const storyJobs = {}; // in-memory job store: storyId -> { status, beats: [{status}], finalPath, error }
 
 app.post('/api/story/generate', async (req, res) => {
-  const { beats, model, aspectRatio, resolution, voiceId } = req.body;
+  const { beats, model, aspectRatio, resolution, voiceId, musicId } = req.body;
 
   if (!Array.isArray(beats) || !beats.length) {
     return res.status(400).json({ error: 'beats array is required' });
@@ -422,7 +438,7 @@ app.post('/api/story/generate', async (req, res) => {
       const listContent = beatFinalPaths.map((p) => `file '${p}'`).join('\n');
       fs.writeFileSync(listPath, listContent);
 
-      const finalPath = path.join(workDir, `${storyId}-final.mp4`);
+      const concatPath = path.join(workDir, `${storyId}-concat.mp4`);
       await new Promise((resolve, reject) => {
         ffmpeg()
           .input(listPath)
@@ -430,8 +446,33 @@ app.post('/api/story/generate', async (req, res) => {
           .outputOptions(['-c copy'])
           .on('error', reject)
           .on('end', resolve)
-          .save(finalPath);
+          .save(concatPath);
       });
+
+      let finalPath = concatPath;
+
+      // Mix in background music if one was uploaded for this story
+      const musicPath = musicId ? musicFiles[musicId] : null;
+      if (musicPath && fs.existsSync(musicPath)) {
+        const withMusicPath = path.join(workDir, `${storyId}-final.mp4`);
+        await new Promise((resolve, reject) => {
+          ffmpeg()
+            .input(concatPath)
+            .input(musicPath)
+            .complexFilter([
+              '[1:a]aloop=loop=-1:size=2e9,volume=0.15[bg]',
+              '[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]',
+            ])
+            .outputOptions(['-map 0:v', '-map [aout]', '-c:v copy', '-c:a aac', '-b:a 192k'])
+            .on('error', reject)
+            .on('end', resolve)
+            .save(withMusicPath);
+        });
+        finalPath = withMusicPath;
+        fs.unlink(concatPath, () => {});
+        fs.unlink(musicPath, () => {});
+        delete musicFiles[musicId];
+      }
 
       storyJobs[storyId].status = 'done';
       storyJobs[storyId].finalPath = finalPath;

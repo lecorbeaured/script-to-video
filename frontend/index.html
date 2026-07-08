@@ -171,6 +171,15 @@
   </div>
   <p class="hint" style="margin-top:0;">Write a full narration. It'll be split into 8-second beats, each rendered as its own clip with matching ElevenLabs voiceover, then stitched into one video.</p>
   <textarea id="storyNarration" placeholder="Write your full story narration here..."></textarea>
+
+  <div class="row" style="margin-top:0;">
+    <div style="flex:1;">
+      <div class="hint" style="margin-top:0;">Background music (optional, mp3):</div>
+      <input type="file" id="musicFile" accept="audio/mpeg,audio/mp3" />
+      <div class="hint" id="musicStatus"></div>
+    </div>
+  </div>
+
   <button class="secondary" id="splitBeatsBtn" style="width:auto;">Split into beats</button>
 
   <div id="beatsEditor"></div>
@@ -418,6 +427,8 @@ async function runWithConcurrencyLimit(items, limit, worker) {
   await Promise.all(runners);
   return results;
 }
+
+generateBtn.addEventListener('click', async () => {
   const raw = $('script').value;
   const scripts = raw.split('\n').map((s) => s.trim()).filter(Boolean);
 
@@ -483,6 +494,33 @@ $('expandBtn').addEventListener('click', async () => {
 
 // ── Story Mode ──
 let currentBeats = [];
+let currentMusicId = null;
+
+$('musicFile').addEventListener('change', async () => {
+  const file = $('musicFile').files[0];
+  const musicStatus = $('musicStatus');
+  if (!file) return;
+
+  musicStatus.textContent = 'Uploading...';
+  try {
+    const backend = getBackendUrl();
+    const formData = new FormData();
+    formData.append('music', file);
+
+    const res = await fetch(`${backend}/api/music/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+
+    currentMusicId = data.musicId;
+    musicStatus.textContent = `Uploaded: ${file.name}`;
+  } catch (err) {
+    musicStatus.textContent = err.message || 'Failed to upload music';
+    musicStatus.style.color = '#f87171';
+  }
+});
 
 function renderBeatsEditor() {
   const container = $('beatsEditor');
@@ -574,6 +612,7 @@ $('generateStoryBtn').addEventListener('click', async () => {
         model: $('model').value,
         aspectRatio: $('aspect').value,
         resolution: $('resolution').value,
+        musicId: currentMusicId,
       }),
     });
     const submitData = await submitRes.json();
