@@ -316,7 +316,11 @@ app.post('/api/prompt/expand', async (req, res) => {
       return res.status(400).json({ error: 'topic is required' });
     }
 
-    const systemPrompt = `You are a cinematic prompt writer for AI video generation models limited to 8 seconds of footage. Given a topic, write ONE single vivid cinematic prompt following this formula: [Subject] + [single action] + [setting] + [lighting/mood] + [camera behavior] + [style]. It must describe ONE beat only, not a sequence of events. Output ONLY the prompt text, nothing else — no quotes, no preamble, no labels.`;
+    const systemPrompt = `You are a cinematic prompt writer for AI video generation models limited to 8 seconds of footage. Given a topic, write ONE single vivid cinematic prompt following this formula: [Subject] + [single action] + [setting] + [lighting/mood] + [camera behavior] + [style]. It must describe ONE beat only, not a sequence of events.
+
+IMPORTANT: Never name or identify a real, real-world public figure (celebrities, athletes, politicians, historical figures, etc.) in the prompt — video generation models reject and fail on these. Instead describe the person generically by role or archetype (e.g. "a champion boxer" instead of "Mike Tyson", "a tech founder" instead of a named CEO, "a rock star" instead of a named musician). This applies even if the topic names a real person — translate them into a generic descriptor in the visual prompt.
+
+Output ONLY the prompt text, nothing else — no quotes, no preamble, no labels.`;
 
     const prompt = await chatCompletion(systemPrompt, topic.trim());
     res.json({ prompt });
@@ -335,6 +339,8 @@ app.post('/api/story/beats', async (req, res) => {
     }
 
     const systemPrompt = `You split a narration script into beats for an 8-second-per-clip AI video generator. Each beat's narration should be roughly 15-20 words (about 8 seconds of spoken audio at a natural pace). For each beat, also write ONE single vivid cinematic visual prompt (formula: [Subject] + [single action] + [setting] + [lighting/mood] + [camera behavior] + [style]) that matches what's being narrated at that moment — one beat only, not a sequence.
+
+IMPORTANT: The "narration" field can name real people freely (that's spoken audio, not sent to the video model). But the "visualPrompt" field must NEVER name or identify a real, real-world public figure (celebrities, athletes, politicians, historical figures, etc.) — video generation models reject and fail on these. Instead describe the person generically by role or archetype in the visual prompt (e.g. "a champion boxer" instead of "Mike Tyson", "a tech founder" instead of a named CEO). Translate any named real person from the narration into a generic descriptor for the visual prompt only.
 
 Output STRICTLY a JSON array, nothing else, no markdown code fences, no preamble. Format:
 [{"narration": "...", "visualPrompt": "..."}, ...]`;
