@@ -231,61 +231,57 @@ function saveHistory(items) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(items));
 }
 
-function renderGrid() {
-  const items = loadHistory();
-  grid.innerHTML = '';
-  emptyMsg.style.display = items.length ? 'none' : 'block';
+const cardElements = new Map(); // item.id -> { el, signature }
 
-  // newest first
-  [...items].reverse().forEach((item) => {
-    const card = document.createElement('div');
-    card.className = 'card';
+function buildCard(item) {
+  const card = document.createElement('div');
+  card.className = 'card';
 
-    const snippet = document.createElement('p');
-    snippet.className = 'script-snippet';
-    snippet.textContent = item.script.length > 100 ? item.script.slice(0, 100) + '...' : item.script;
-    card.appendChild(snippet);
+  const snippet = document.createElement('p');
+  snippet.className = 'script-snippet';
+  snippet.textContent = item.script.length > 100 ? item.script.slice(0, 100) + '...' : item.script;
+  card.appendChild(snippet);
 
-    const statusLine = document.createElement('div');
-    statusLine.className = 'card-status';
-    statusLine.textContent = item.status === 'done' ? 'Done' : item.status === 'error' ? `Error: ${item.error || ''}` : `Status: ${item.status}`;
-    card.appendChild(statusLine);
+  const statusLine = document.createElement('div');
+  statusLine.className = 'card-status';
+  statusLine.textContent = item.status === 'done' ? 'Done' : item.status === 'error' ? `Error: ${item.error || ''}` : `Status: ${item.status}`;
+  card.appendChild(statusLine);
 
-    if (item.status === 'done' && item.videoUrl) {
-      const video = document.createElement('video');
-      video.src = item.videoUrl;
-      video.controls = true;
-      card.appendChild(video);
+  if (item.status === 'done' && item.videoUrl) {
+    const video = document.createElement('video');
+    video.src = item.videoUrl;
+    video.controls = true;
+    card.appendChild(video);
 
-      const actions = document.createElement('div');
-      actions.className = 'card-actions';
+    const actions = document.createElement('div');
+    actions.className = 'card-actions';
 
-      const downloadBtn = document.createElement('button');
-      downloadBtn.className = 'secondary';
-      downloadBtn.textContent = 'Download';
-      downloadBtn.addEventListener('click', async () => {
-        downloadBtn.textContent = 'Downloading...';
-        try {
-          const res = await fetch(item.videoUrl);
-          const blob = await res.blob();
-          const blobUrl = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = blobUrl;
-          a.download = `${item.jobId || 'video'}.mp4`;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          URL.revokeObjectURL(blobUrl);
-        } catch (err) {
-          console.error(err);
-        } finally {
-          downloadBtn.textContent = 'Download';
-        }
-      });
-      actions.appendChild(downloadBtn);
+    const downloadBtn = document.createElement('button');
+    downloadBtn.className = 'secondary';
+    downloadBtn.textContent = 'Download';
+    downloadBtn.addEventListener('click', async () => {
+      downloadBtn.textContent = 'Downloading...';
+      try {
+        const res = await fetch(item.videoUrl);
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `${item.jobId || 'video'}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(blobUrl);
+      } catch (err) {
+        console.error(err);
+      } finally {
+        downloadBtn.textContent = 'Download';
+      }
+    });
+    actions.appendChild(downloadBtn);
 
-      if (item.jobId) {
-        const overlayBtn = document.createElement('button');
+    if (item.jobId) {
+      const overlayBtn = document.createElement('button');
       overlayBtn.className = 'secondary';
       overlayBtn.textContent = 'Add text overlay';
       overlayBtn.addEventListener('click', async () => {
@@ -326,22 +322,51 @@ function renderGrid() {
         }
       });
       actions.appendChild(overlayBtn);
-      }
-
-      const removeBtn = document.createElement('button');
-      removeBtn.className = 'secondary';
-      removeBtn.textContent = 'Remove';
-      removeBtn.addEventListener('click', () => {
-        const all = loadHistory().filter((h) => h.id !== item.id);
-        saveHistory(all);
-        renderGrid();
-      });
-      actions.appendChild(removeBtn);
-
-      card.appendChild(actions);
     }
 
-    grid.appendChild(card);
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'secondary';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', () => {
+      const all = loadHistory().filter((h) => h.id !== item.id);
+      saveHistory(all);
+      cardElements.delete(item.id);
+      renderGrid();
+    });
+    actions.appendChild(removeBtn);
+
+    card.appendChild(actions);
+  }
+
+  return card;
+}
+
+function renderGrid() {
+  const items = loadHistory();
+  emptyMsg.style.display = items.length ? 'none' : 'block';
+
+  const orderedIds = [...items].reverse().map((item) => item.id);
+
+  // Build/reuse each card based on a signature of its meaningful fields.
+  // Only rebuild the DOM node (and therefore reload its <video>) when something actually changed.
+  [...items].reverse().forEach((item) => {
+    const signature = JSON.stringify({ status: item.status, videoUrl: item.videoUrl, error: item.error, script: item.script });
+    const existing = cardElements.get(item.id);
+    if (!existing || existing.signature !== signature) {
+      const el = buildCard(item);
+      cardElements.set(item.id, { el, signature });
+    }
+  });
+
+  // Remove any cached cards for items no longer in history
+  for (const id of [...cardElements.keys()]) {
+    if (!orderedIds.includes(id)) cardElements.delete(id);
+  }
+
+  // Reorder DOM to match current newest-first order, without touching untouched nodes
+  orderedIds.forEach((id) => {
+    const { el } = cardElements.get(id);
+    grid.appendChild(el); // appendChild on an existing node just moves it, doesn't recreate/reload it
   });
 }
 
