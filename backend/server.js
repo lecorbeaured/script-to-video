@@ -117,7 +117,8 @@ async function generateVideoAndWait(prompt, opts, tempPath, maxAttempts = 60) {
       return tempPath;
     }
     if (statusData.status === 'failed' || statusData.status === 'error') {
-      throw new Error(statusData.error?.message || 'Video generation failed');
+      console.error('OpenRouter video generation failed, full response:', JSON.stringify(statusData));
+      throw new Error(statusData.error?.message || statusData.error?.reason || JSON.stringify(statusData.error) || 'Video generation failed');
     }
   }
   throw new Error('Timed out waiting for video generation');
