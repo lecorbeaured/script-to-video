@@ -402,7 +402,22 @@ async function generateOne(backend, script, opts) {
   }
 }
 
-generateBtn.addEventListener('click', async () => {
+// Run async tasks with a concurrency cap so we don't fire too many jobs at OpenRouter at once
+async function runWithConcurrencyLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function runNext() {
+    const i = nextIndex++;
+    if (i >= items.length) return;
+    results[i] = await worker(items[i], i);
+    return runNext();
+  }
+
+  const runners = Array.from({ length: Math.min(limit, items.length) }, runNext);
+  await Promise.all(runners);
+  return results;
+}
   const raw = $('script').value;
   const scripts = raw.split('\n').map((s) => s.trim()).filter(Boolean);
 
@@ -422,8 +437,9 @@ generateBtn.addEventListener('click', async () => {
 
     setStatus(`Submitting ${scripts.length} job${scripts.length > 1 ? 's' : ''}...`);
 
-    // Fire all jobs in parallel — each tracks its own card independently
-    await Promise.all(scripts.map((script) => generateOne(backend, script, opts)));
+    // Fire jobs with a concurrency cap (3 at a time) — firing all at once can hit
+    // OpenRouter/Veo rate limits and cause some jobs to fail
+    await runWithConcurrencyLimit(scripts, 3, (script) => generateOne(backend, script, opts));
 
     setStatus('All jobs finished.');
   } catch (err) {
