@@ -82,28 +82,48 @@
   .section-header h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 0; }
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
   }
   .card {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 12px;
+    padding: 10px;
   }
   .card .script-snippet {
     font-size: 13px;
     color: var(--text);
-    margin: 0 0 8px 0;
-    max-height: 60px;
+    margin: 0 0 6px 0;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .card .card-status {
-    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
     color: var(--muted);
-    margin-bottom: 8px;
+    margin-bottom: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
+  .card .card-status .status-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--muted);
+  }
+  .status-dot.in-progress { background: #f59e0b; }
+  .status-dot.done { background: #34d399; }
+  .status-dot.error { background: #f87171; }
   .card video {
     width: 100%;
     border-radius: 8px;
@@ -300,12 +320,20 @@ function buildCard(item) {
 
   const snippet = document.createElement('p');
   snippet.className = 'script-snippet';
-  snippet.textContent = item.script.length > 100 ? item.script.slice(0, 100) + '...' : item.script;
+  snippet.textContent = item.script;
+  snippet.title = item.script;
   card.appendChild(snippet);
 
   const statusLine = document.createElement('div');
   statusLine.className = 'card-status';
-  statusLine.textContent = item.status === 'done' ? 'Done' : item.status === 'error' ? `Error: ${item.error || ''}` : `Status: ${item.status}`;
+  const statusDot = document.createElement('span');
+  statusDot.className = `status-dot ${item.status === 'done' ? 'done' : item.status === 'error' ? 'error' : 'in-progress'}`;
+  statusLine.appendChild(statusDot);
+  const statusText = document.createElement('span');
+  statusText.className = 'status-text';
+  statusText.textContent = item.status === 'done' ? 'Done' : item.status === 'error' ? `Error: ${item.error || ''}` : `Status: ${item.status}`;
+  statusText.title = statusText.textContent;
+  statusLine.appendChild(statusText);
   card.appendChild(statusLine);
 
   if (item.status === 'done' && item.videoUrl) {
