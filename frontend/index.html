@@ -167,6 +167,42 @@
   <p class="empty" id="emptyMsg">No videos yet — generate one above.</p>
 
   <div class="section-header">
+    <h2>Image Generator</h2>
+  </div>
+  <textarea id="imagePrompt" placeholder="Describe the image you want..." style="min-height:80px;"></textarea>
+  <div class="row">
+    <select id="imageModel">
+      <option value="bytedance-seed/seedream-4.5">Seedream 4.5 (cheap, $0.04/img)</option>
+      <option value="google/gemini-2.5-flash-image-preview">Gemini 2.5 Flash Image</option>
+      <option value="google/gemini-3.1-flash-image-preview">Gemini 3.1 Flash Image</option>
+      <option value="black-forest-labs/flux.2-pro">FLUX.2 Pro</option>
+    </select>
+    <select id="imageAspect">
+      <option value="1:1">1:1 (square)</option>
+      <option value="9:16">9:16 (vertical)</option>
+      <option value="16:9">16:9 (horizontal)</option>
+      <option value="4:5">4:5 (portrait)</option>
+    </select>
+  </div>
+  <button id="generateImageBtn">Generate Image</button>
+  <div class="status" id="imageStatus"></div>
+
+  <div id="imagePreviewWrap" style="display:none; margin-top:12px;">
+    <img id="imagePreview" style="width:100%; border-radius:10px; border:1px solid var(--border);" />
+    <div class="row">
+      <input type="text" id="captionInput" placeholder="Caption text (optional)" style="flex:1;" />
+      <select id="captionPosition">
+        <option value="bottom">Bottom</option>
+        <option value="top">Top</option>
+      </select>
+    </div>
+    <div class="row">
+      <button class="secondary" id="addCaptionBtn" style="width:auto;">Add caption</button>
+      <button class="secondary" id="downloadImageBtn" style="width:auto;">Download</button>
+    </div>
+  </div>
+
+  <div class="section-header">
     <h2>Story Mode</h2>
   </div>
   <p class="hint" style="margin-top:0;">Write a full narration. It'll be split into 8-second beats, each rendered as its own clip with matching ElevenLabs voiceover, then stitched into one video.</p>
@@ -685,6 +721,95 @@ $('generateStoryBtn').addEventListener('click', async () => {
   } finally {
     btn.disabled = false;
   }
+});
+
+// ── Image Generator ──
+let currentImageBase64 = null;
+
+$('generateImageBtn').addEventListener('click', async () => {
+  const prompt = $('imagePrompt').value.trim();
+  if (!prompt) {
+    setStatus('Enter an image prompt first.', true);
+    return;
+  }
+
+  const btn = $('generateImageBtn');
+  const imageStatus = $('imageStatus');
+  btn.disabled = true;
+  imageStatus.textContent = 'Generating...';
+  imageStatus.style.color = 'var(--muted)';
+
+  try {
+    const backend = getBackendUrl();
+    const res = await fetch(`${backend}/api/image/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        model: $('imageModel').value,
+        aspectRatio: $('imageAspect').value,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Image generation failed');
+
+    currentImageBase64 = data.imageBase64;
+    $('imagePreview').src = `data:${data.mimeType};base64,${currentImageBase64}`;
+    $('imagePreviewWrap').style.display = 'block';
+    imageStatus.textContent = 'Done.';
+  } catch (err) {
+    console.error(err);
+    imageStatus.textContent = err.message || 'Failed to generate image';
+    imageStatus.style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('addCaptionBtn').addEventListener('click', async () => {
+  const caption = $('captionInput').value.trim();
+  if (!caption || !currentImageBase64) return;
+
+  const btn = $('addCaptionBtn');
+  const imageStatus = $('imageStatus');
+  btn.disabled = true;
+  btn.textContent = 'Adding caption...';
+
+  try {
+    const backend = getBackendUrl();
+    const res = await fetch(`${backend}/api/image/caption`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageBase64: currentImageBase64,
+        caption,
+        position: $('captionPosition').value,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to add caption');
+
+    currentImageBase64 = data.imageBase64;
+    $('imagePreview').src = `data:${data.mimeType};base64,${currentImageBase64}`;
+    imageStatus.textContent = 'Caption added.';
+  } catch (err) {
+    console.error(err);
+    imageStatus.textContent = err.message || 'Failed to add caption';
+    imageStatus.style.color = '#f87171';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Add caption';
+  }
+});
+
+$('downloadImageBtn').addEventListener('click', () => {
+  if (!currentImageBase64) return;
+  const a = document.createElement('a');
+  a.href = `data:image/png;base64,${currentImageBase64}`;
+  a.download = 'generated-image.png';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 });
 
 renderGrid();

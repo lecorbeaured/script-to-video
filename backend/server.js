@@ -8,6 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 const ffmpeg = require('fluent-ffmpeg');
 const multer = require('multer');
+const sharp = require('sharp');
 
 const upload = multer({ dest: os.tmpdir(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB cap
 
@@ -320,6 +321,104 @@ app.get('/api/status/:jobId', async (req, res) => {
   } catch (err) {
     console.error('status error:', err);
     res.status(500).json({ error: 'Failed to check job status' });
+  }
+});
+
+// ── Image Generator ──
+app.post('/api/image/generate', async (req, res) => {
+  try {
+    const { prompt, model = 'bytedance-seed/seedream-4.5', aspectRatio = '1:1', resolution } = req.body;
+    if (!prompt || !prompt.trim()) {
+      return res.status(400).json({ error: 'prompt is required' });
+    }
+
+    const body = { model, prompt: prompt.trim(), aspect_ratio: aspectRatio };
+    if (resolution) body.resolution = resolution;
+
+    const r = await fetch(`${OR_BASE}/images`, {
+      method: 'POST',
+      headers: orHeaders(),
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+
+    if (!r.ok) {
+      console.error('OpenRouter image generate error:', JSON.stringify(data));
+      return res.status(r.status).json({ error: data.error?.message || JSON.stringify(data.error) || 'Image generation failed' });
+    }
+
+    // Response shape: images returned as base64. Normalize whichever field the model used.
+    const imageBase64 = data.data?.[0]?.b64_json || data.images?.[0]?.b64_json || data.images?.[0];
+    if (!imageBase64) {
+      console.error('Unexpected image response shape:', JSON.stringify(data));
+      return res.status(500).json({ error: 'No image data in response' });
+    }
+
+    res.json({ imageBase64, mimeType: 'image/png' });
+  } catch (err) {
+    console.error('image generate error:', err);
+    res.status(500).json({ error: err.message || 'Failed to generate image' });
+  }
+});
+
+// Burn a text caption onto a base64 image using sharp (SVG text overlay composited on top)
+app.post('/api/image/caption', async (req, res) => {
+  try {
+    const { imageBase64, caption, position = 'bottom', fontSize = 42 } = req.body;
+    if (!imageBase64) return res.status(400).json({ error: 'imageBase64 is required' });
+    if (!caption || !caption.trim()) return res.status(400).json({ error: 'caption is required' });
+
+    const inputBuffer = Buffer.from(imageBase64, 'base64');
+    const image = sharp(inputBuffer);
+    const metadata = await image.metadata();
+    const width = metadata.width || 1024;
+    const height = metadata.height || 1024;
+
+    // Simple word-wrap: break caption into lines that roughly fit the image width
+    const maxCharsPerLine = Math.max(10, Math.floor(width / (fontSize * 0.55)));
+    const words = caption.trim().split(/\s+/);
+    const lines = [];
+    let currentLine = '';
+    for (const word of words) {
+      const candidate = currentLine ? `${currentLine} ${word}` : word;
+      if (candidate.length > maxCharsPerLine && currentLine) {
+        lines.push(currentLine);
+        currentLine = word;
+      } else {
+        currentLine = candidate;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
+
+    const lineHeight = fontSize * 1.3;
+    const bandHeight = lines.length * lineHeight + fontSize * 0.8;
+    const bandY = position === 'top' ? 0 : height - bandHeight;
+
+    const escapeXml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const textElements = lines
+      .map((line, i) => {
+        const y = bandY + fontSize * 0.9 + i * lineHeight;
+        return `<text x="50%" y="${y}" font-family="Arial, sans-serif" font-size="${fontSize}" font-weight="bold" fill="white" text-anchor="middle" stroke="black" stroke-width="${fontSize * 0.06}" paint-order="stroke">${escapeXml(line)}</text>`;
+      })
+      .join('\n');
+
+    const svg = `
+      <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+        <rect x="0" y="${bandY}" width="${width}" height="${bandHeight}" fill="black" fill-opacity="0.35" />
+        ${textElements}
+      </svg>
+    `;
+
+    const outputBuffer = await image
+      .composite([{ input: Buffer.from(svg), top: 0, left: 0 }])
+      .png()
+      .toBuffer();
+
+    res.json({ imageBase64: outputBuffer.toString('base64'), mimeType: 'image/png' });
+  } catch (err) {
+    console.error('image caption error:', err);
+    res.status(500).json({ error: err.message || 'Failed to add caption' });
   }
 });
 
