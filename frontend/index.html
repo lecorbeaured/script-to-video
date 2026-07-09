@@ -225,6 +225,7 @@
   <details class="settings">
     <summary>Backend URL</summary>
     <input type="text" id="backendUrl" placeholder="https://your-backend.up.railway.app" />
+    <input type="text" id="apiKey" placeholder="API key (must match backend's API_KEY)" style="margin-top:8px;" />
   </details>
 </div>
 
@@ -233,6 +234,7 @@ const $ = (id) => document.getElementById(id);
 const statusEl = $('status');
 const generateBtn = $('generateBtn');
 const backendUrlInput = $('backendUrl');
+const apiKeyInput = $('apiKey');
 const grid = $('grid');
 const emptyMsg = $('emptyMsg');
 const clearBtn = $('clearBtn');
@@ -244,10 +246,25 @@ backendUrlInput.addEventListener('change', () => {
   localStorage.setItem('backendUrl', backendUrlInput.value.trim());
 });
 
+apiKeyInput.value = localStorage.getItem('apiKey') || '';
+apiKeyInput.addEventListener('change', () => {
+  localStorage.setItem('apiKey', apiKeyInput.value.trim());
+});
+
 function getBackendUrl() {
   const url = backendUrlInput.value.trim();
   if (!url) throw new Error('Set your backend URL first (see "Backend URL" below the button).');
   return url.replace(/\/$/, '');
+}
+
+function getApiKey() {
+  const key = apiKeyInput.value.trim();
+  if (!key) throw new Error('Set your API key first (see "Backend URL" below the button).');
+  return key;
+}
+
+function authHeaders(extra = {}) {
+  return { 'x-api-key': getApiKey(), ...extra };
 }
 
 function setStatus(msg, isError = false) {
@@ -330,7 +347,7 @@ function buildCard(item) {
           const backend = getBackendUrl();
           const res = await fetch(`${backend}/api/overlay/${item.jobId}`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ text: text.trim(), position: 'bottom' }),
           });
           if (!res.ok) {
@@ -424,7 +441,7 @@ async function pollJob(backend, jobId, onTick) {
   const maxAttempts = 60; // ~5 min at 5s intervals
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise((r) => setTimeout(r, 5000));
-    const res = await fetch(`${backend}/api/status/${jobId}`);
+    const res = await fetch(`${backend}/api/status/${jobId}`, { headers: authHeaders() });
     const data = await res.json();
 
     if (!res.ok) throw new Error(data.error?.message || data.error || 'Status check failed');
@@ -432,7 +449,7 @@ async function pollJob(backend, jobId, onTick) {
     onTick(data.status || 'processing', i * 5);
 
     if (data.status === 'completed' || data.status === 'succeeded') {
-      return `${backend}/api/video/${jobId}`;
+      return `${backend}/api/video/${jobId}?key=${encodeURIComponent(getApiKey())}`;
     }
     if (data.status === 'failed' || data.status === 'error') {
       throw new Error(data.error?.message || 'Video generation failed.');
@@ -449,7 +466,7 @@ async function generateOne(backend, script, opts) {
   try {
     const submitRes = await fetch(`${backend}/api/generate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ script, ...opts }),
     });
     const submitData = await submitRes.json();
@@ -536,7 +553,7 @@ $('expandBtn').addEventListener('click', async () => {
     const backend = getBackendUrl();
     const res = await fetch(`${backend}/api/prompt/expand`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ topic }),
     });
     const data = await res.json();
@@ -572,6 +589,7 @@ $('musicFile').addEventListener('change', async () => {
 
     const res = await fetch(`${backend}/api/music/upload`, {
       method: 'POST',
+      headers: authHeaders(),
       body: formData,
     });
     const data = await res.json();
@@ -642,7 +660,7 @@ $('splitBeatsBtn').addEventListener('click', async () => {
     const backend = getBackendUrl();
     const res = await fetch(`${backend}/api/story/beats`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ narration }),
     });
     const data = await res.json();
@@ -669,7 +687,7 @@ $('generateStoryBtn').addEventListener('click', async () => {
     const backend = getBackendUrl();
     const submitRes = await fetch(`${backend}/api/story/generate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         beats: currentBeats,
         model: $('model').value,
@@ -687,7 +705,7 @@ $('generateStoryBtn').addEventListener('click', async () => {
     const maxAttempts = 180; // up to ~15 min for a multi-beat story
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise((r) => setTimeout(r, 5000));
-      const statusRes = await fetch(`${backend}/api/story/status/${storyId}`);
+      const statusRes = await fetch(`${backend}/api/story/status/${storyId}`, { headers: authHeaders() });
       const statusData = await statusRes.json();
       if (!statusRes.ok) throw new Error(statusData.error || 'Status check failed');
 
@@ -695,7 +713,7 @@ $('generateStoryBtn').addEventListener('click', async () => {
       storyStatus.textContent = beatSummary;
 
       if (statusData.status === 'done') {
-        const videoUrl = `${backend}/api/story/video/${storyId}`;
+        const videoUrl = `${backend}/api/story/video/${storyId}?key=${encodeURIComponent(getApiKey())}`;
         const newId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         upsertHistoryItem({
           id: newId,
@@ -743,7 +761,7 @@ $('generateImageBtn').addEventListener('click', async () => {
     const backend = getBackendUrl();
     const res = await fetch(`${backend}/api/image/generate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         prompt,
         model: $('imageModel').value,
@@ -779,7 +797,7 @@ $('addCaptionBtn').addEventListener('click', async () => {
     const backend = getBackendUrl();
     const res = await fetch(`${backend}/api/image/caption`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         imageBase64: currentImageBase64,
         caption,

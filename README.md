@@ -10,12 +10,13 @@ Text box → OpenRouter video generation (Veo 3.1, Seedance, Wan, etc.) → play
    - `OPENROUTER_API_KEY` — your OpenRouter key
    - `ALLOWED_ORIGIN` — your Vercel frontend URL (e.g. `https://script-to-video.vercel.app`), or `*` while testing
    - `DEFAULT_VIDEO_MODEL` — optional, defaults to `google/veo-3.1-lite`
+   - `API_KEY` — a long random secret (e.g. `openssl rand -hex 32`). Required on every request via the `x-api-key` header or a `?key=` query param — without it the backend rejects all traffic with 401. This is what stops strangers from spending your OpenRouter/ElevenLabs credit if they find the Railway URL.
 4. Railway auto-detects `npm start`. Note the generated public URL (e.g. `https://script-to-video-backend.up.railway.app`).
 
 ## Frontend (Vercel)
 
 1. Deploy `frontend/` as a static site (no build step needed — it's plain HTML/JS).
-2. Once live, open the site, expand "Backend URL" below the button, and paste your Railway backend URL. It's saved in the browser via localStorage so you only set it once per device.
+2. Once live, open the site, expand "Backend URL" below the button, and paste your Railway backend URL and the same `API_KEY` value you set on Railway. Both are saved in the browser via localStorage so you only set them once per device.
 
 ## Notes
 

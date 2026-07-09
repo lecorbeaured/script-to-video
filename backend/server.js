@@ -23,6 +23,7 @@ const DEFAULT_MODEL = process.env.DEFAULT_VIDEO_MODEL || 'google/veo-3.1-lite';
 const DEFAULT_TEXT_MODEL = process.env.DEFAULT_TEXT_MODEL || 'deepseek/deepseek-chat';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM'; // default: Rachel
+const API_KEY = process.env.API_KEY;
 
 if (!OPENROUTER_API_KEY) {
   console.warn('WARNING: OPENROUTER_API_KEY is not set. Set it in your environment / Railway variables.');
@@ -30,6 +31,32 @@ if (!OPENROUTER_API_KEY) {
 if (!ELEVENLABS_API_KEY) {
   console.warn('WARNING: ELEVENLABS_API_KEY is not set. Story Mode voiceover will fail without it.');
 }
+if (!API_KEY) {
+  console.warn('WARNING: API_KEY is not set. Every request will be rejected with 401 until you set API_KEY in your environment / Railway variables.');
+}
+
+// Every route except /api/health spends OpenRouter/ElevenLabs credit, so require a shared
+// secret. Accepted via the x-api-key header (used by JS fetch calls) or a ?key= query param
+// (needed for the <video> tag, which can't attach custom headers).
+function timingSafeEqualStrings(a, b) {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+app.use((req, res, next) => {
+  if (req.path === '/api/health') return next();
+  const provided = req.get('x-api-key') || req.query.key || '';
+  if (!API_KEY || !provided || !timingSafeEqualStrings(String(provided), API_KEY)) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+});
+
+// jobId always comes from the client and gets used both in an outbound OpenRouter URL and in
+// local temp file paths — validate its shape before touching either.
+const JOB_ID_RE = /^[A-Za-z0-9_-]+$/;
 
 const OR_BASE = 'https://openrouter.ai/api/v1';
 
@@ -134,7 +161,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // Upload a background music track (mp3) for use in Story Mode
-const musicFiles = {}; // musicId -> file path
+const musicFiles = {}; // musicId -> { path, uploadedAt }
 app.post('/api/music/upload', upload.single('music'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No music file uploaded' });
@@ -142,7 +169,7 @@ app.post('/api/music/upload', upload.single('music'), (req, res) => {
   const musicId = crypto.randomBytes(8).toString('hex');
   const destPath = path.join(os.tmpdir(), `music-${musicId}.mp3`);
   fs.renameSync(req.file.path, destPath);
-  musicFiles[musicId] = destPath;
+  musicFiles[musicId] = { path: destPath, uploadedAt: Date.now() };
   res.json({ musicId });
 });
 
@@ -209,7 +236,9 @@ app.post('/api/generate', async (req, res) => {
 app.get('/api/video/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
+    if (!JOB_ID_RE.test(jobId)) return res.status(400).json({ error: 'Invalid job ID' });
     const index = req.query.index || '0';
+    if (!/^\d+$/.test(index)) return res.status(400).json({ error: 'Invalid index' });
 
     const upstream = await fetch(
       `${OR_BASE}/videos/${jobId}/content?index=${index}`,
@@ -246,6 +275,7 @@ app.post('/api/overlay/:jobId', async (req, res) => {
   const { jobId } = req.params;
   const { text, position = 'bottom', fontSize = 48 } = req.body;
 
+  if (!JOB_ID_RE.test(jobId)) return res.status(400).json({ error: 'Invalid job ID' });
   if (!text || !text.trim()) {
     return res.status(400).json({ error: 'text is required' });
   }
@@ -315,6 +345,7 @@ app.get('/api/status/:jobId', async (req, res) => {
 
   try {
     const { jobId } = req.params;
+    if (!JOB_ID_RE.test(jobId)) return res.status(400).json({ error: 'Invalid job ID' });
     const r = await fetch(`${OR_BASE}/videos/${jobId}`, { headers: orHeaders() });
     const data = await r.json();
     res.status(r.status).json(data);
@@ -477,7 +508,7 @@ Output STRICTLY a JSON array, nothing else, no markdown code fences, no preamble
 });
 
 // ── Story Mode: Step 2 — generate all beats (video + voiceover), mux, and stitch ──
-const storyJobs = {}; // in-memory job store: storyId -> { status, beats: [{status}], finalPath, error }
+const storyJobs = {}; // in-memory job store: storyId -> { status, beats: [{status}], finalPath, error, createdAt }
 
 app.post('/api/story/generate', async (req, res) => {
   const { beats, model, aspectRatio, resolution, voiceId, musicId } = req.body;
@@ -492,6 +523,7 @@ app.post('/api/story/generate', async (req, res) => {
     beats: beats.map(() => ({ status: 'pending' })),
     finalPath: null,
     error: null,
+    createdAt: Date.now(),
   };
 
   res.json({ storyId });
@@ -551,7 +583,7 @@ app.post('/api/story/generate', async (req, res) => {
       let finalPath = concatPath;
 
       // Mix in background music if one was uploaded for this story
-      const musicPath = musicId ? musicFiles[musicId] : null;
+      const musicPath = musicId ? musicFiles[musicId]?.path : null;
       if (musicId && !musicPath) {
         console.warn(`Music requested (musicId=${musicId}) but file not found — likely lost to a server restart/redeploy since upload. Skipping music.`);
         storyJobs[storyId].musicWarning = 'Background music was uploaded but could not be found when generating (the server may have restarted between upload and generation) — video was created without music.';
@@ -604,6 +636,30 @@ app.get('/api/story/video/:storyId', (req, res) => {
   res.set('Content-Type', 'video/mp4');
   fs.createReadStream(job.finalPath).pipe(res);
 });
+
+// storyJobs and musicFiles are in-memory and never otherwise pruned — sweep out anything
+// stale so long-running deployments don't leak temp files or grow their job maps forever.
+const JOB_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+function cleanupStaleJobs() {
+  const now = Date.now();
+
+  for (const [storyId, job] of Object.entries(storyJobs)) {
+    if (now - job.createdAt > JOB_TTL_MS) {
+      if (job.finalPath) fs.unlink(job.finalPath, () => {});
+      delete storyJobs[storyId];
+    }
+  }
+
+  for (const [musicId, entry] of Object.entries(musicFiles)) {
+    if (now - entry.uploadedAt > JOB_TTL_MS) {
+      fs.unlink(entry.path, () => {});
+      delete musicFiles[musicId];
+    }
+  }
+}
+
+setInterval(cleanupStaleJobs, 30 * 60 * 1000); // sweep every 30 min
 
 const PORT = process.env.PORT || 8787;
 app.listen(PORT, () => {
