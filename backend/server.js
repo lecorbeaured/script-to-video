@@ -538,6 +538,8 @@ app.post('/api/prompt/expand', async (req, res) => {
 
 IMPORTANT: Never name or identify a real, real-world public figure (celebrities, athletes, politicians, historical figures, etc.) in the prompt — video generation models reject and fail on these. Instead describe the person generically by role or archetype (e.g. "a champion boxer" instead of "Mike Tyson", "a tech founder" instead of a named CEO, "a rock star" instead of a named musician). This applies even if the topic names a real person — translate them into a generic descriptor in the visual prompt.
 
+Also, to avoid content-filter false positives on realistic human depictions (a known issue with Veo and similar models): prefer medium/wide shots over tight close-ups on a human face, and don't stack an age word (e.g. "young", "teenage") directly against a gendered noun/pronoun ("she", "her", "a young woman") — describe the person by role or action instead (e.g. "an astronaut" rather than "a young astronaut... she..."). This is a precaution against filter rejections, not a restriction on the story itself.
+
 Output ONLY the prompt text, nothing else — no quotes, no preamble, no labels.`;
 
     const prompt = await chatCompletion(systemPrompt, topic.trim());
@@ -559,6 +561,8 @@ app.post('/api/story/beats', async (req, res) => {
     const systemPrompt = `You split a narration script into beats for an 8-second-per-clip AI video generator. Each beat's narration should be roughly 15-20 words (about 8 seconds of spoken audio at a natural pace). For each beat, also write ONE single vivid cinematic visual prompt (formula: [Subject] + [single action] + [setting] + [lighting/mood] + [camera behavior] + [style]) that matches what's being narrated at that moment — one beat only, not a sequence.
 
 IMPORTANT: The "narration" field can name real people freely (that's spoken audio, not sent to the video model). But the "visualPrompt" field must NEVER name or identify a real, real-world public figure (celebrities, athletes, politicians, historical figures, etc.) — video generation models reject and fail on these. Instead describe the person generically by role or archetype in the visual prompt (e.g. "a champion boxer" instead of "Mike Tyson", "a tech founder" instead of a named CEO). Translate any named real person from the narration into a generic descriptor for the visual prompt only.
+
+Also, in the "visualPrompt" field only, avoid patterns that trigger content-filter false positives on realistic human depictions (a known issue with Veo and similar models): prefer medium/wide shots over tight close-ups on a human face, and don't stack an age word (e.g. "young", "teenage") directly against a gendered noun/pronoun ("she", "her", "a young woman") — describe the person by role or action instead. This is a precaution against filter rejections, not a restriction on the narration or story itself.
 
 Output STRICTLY a JSON array, nothing else, no markdown code fences, no preamble. Format:
 [{"narration": "...", "visualPrompt": "..."}, ...]`;
