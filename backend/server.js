@@ -608,32 +608,40 @@ app.post('/api/story/generate', async (req, res) => {
     try {
       for (let i = 0; i < beats.length; i++) {
         const beat = beats[i];
-        storyJobs[storyId].beats[i].status = 'generating video';
+        try {
+          storyJobs[storyId].beats[i].status = 'generating video';
 
-        const videoPath = path.join(workDir, `${storyId}-beat${i}-video.mp4`);
-        await generateVideoAndWait(beat.visualPrompt, { model, aspectRatio, resolution }, videoPath);
+          const videoPath = path.join(workDir, `${storyId}-beat${i}-video.mp4`);
+          await generateVideoAndWait(beat.visualPrompt, { model, aspectRatio, resolution }, videoPath);
 
-        storyJobs[storyId].beats[i].status = 'generating voiceover';
-        const audioBuffer = await elevenLabsTTS(beat.narration, voiceId);
-        const audioPath = path.join(workDir, `${storyId}-beat${i}-audio.mp3`);
-        fs.writeFileSync(audioPath, audioBuffer);
+          storyJobs[storyId].beats[i].status = 'generating voiceover';
+          const audioBuffer = await elevenLabsTTS(beat.narration, voiceId);
+          const audioPath = path.join(workDir, `${storyId}-beat${i}-audio.mp3`);
+          fs.writeFileSync(audioPath, audioBuffer);
 
-        storyJobs[storyId].beats[i].status = 'muxing';
-        const finalBeatPath = path.join(workDir, `${storyId}-beat${i}-final.mp4`);
-        await new Promise((resolve, reject) => {
-          ffmpeg(videoPath)
-            .input(audioPath)
-            .outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest'])
-            .on('error', reject)
-            .on('end', resolve)
-            .save(finalBeatPath);
-        });
+          storyJobs[storyId].beats[i].status = 'muxing';
+          const finalBeatPath = path.join(workDir, `${storyId}-beat${i}-final.mp4`);
+          await new Promise((resolve, reject) => {
+            ffmpeg(videoPath)
+              .input(audioPath)
+              .outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest'])
+              .on('error', reject)
+              .on('end', resolve)
+              .save(finalBeatPath);
+          });
 
-        beatFinalPaths.push(finalBeatPath);
-        storyJobs[storyId].beats[i].status = 'done';
+          beatFinalPaths.push(finalBeatPath);
+          storyJobs[storyId].beats[i].status = 'done';
 
-        fs.unlink(videoPath, () => {});
-        fs.unlink(audioPath, () => {});
+          fs.unlink(videoPath, () => {});
+          fs.unlink(audioPath, () => {});
+        } catch (beatErr) {
+          // Tag the beat number onto the error so it survives into the top-level catch below —
+          // otherwise a failure just says e.g. "content may have been filtered" with no way to
+          // tell which of several beats/prompts actually caused it.
+          storyJobs[storyId].beats[i].status = 'error';
+          throw new Error(`Beat ${i + 1}: ${beatErr.message}`);
+        }
       }
 
       // Concatenate all beats into one final video
