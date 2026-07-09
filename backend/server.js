@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
 const multer = require('multer');
 const sharp = require('sharp');
@@ -275,13 +276,39 @@ const FONT_CSS_FALLBACK = { sans: 'sans-serif', serif: 'serif', display: 'sans-s
 
 // Exact file paths for the video overlay tool. ffmpeg's drawtext filter only resolves family
 // names (font=) when built with libfontconfig, which isn't guaranteed — fontfile= (needs only
-// libfreetype) is what's proven to work here, so we point straight at files installed by
-// nixpacks.toml's aptPkgs (fonts-dejavu-core, fonts-oswald).
+// libfreetype) is what's proven to work here, so we point straight at a file. These are best
+// guesses at where each apt package (fonts-dejavu-core, fonts-oswald) installs its .ttf — if a
+// guess is wrong, getFontFile() below falls back to asking fontconfig directly.
 const FONT_FILES = {
   sans: '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
   serif: '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf',
   display: '/usr/share/fonts/truetype/oswald/Oswald-Bold.ttf',
 };
+
+const fontFileCache = {};
+
+// Fallback for when our hardcoded guess in FONT_FILES doesn't match the file a given apt
+// package version actually installed — asks fontconfig (fc-match) to resolve the family
+// by name instead, which is authoritative regardless of exact filename/version.
+function resolveFontFileViaFontconfig(family) {
+  if (family in fontFileCache) return fontFileCache[family];
+  let resolved = null;
+  try {
+    const out = execFileSync('fc-match', ['-f', '%{file}', `${family}:bold`], { encoding: 'utf8' }).trim();
+    if (out && fs.existsSync(out)) resolved = out;
+  } catch (err) {
+    console.error(`fc-match lookup failed for "${family}":`, err.message);
+  }
+  fontFileCache[family] = resolved;
+  return resolved;
+}
+
+function getFontFile(fontKey) {
+  const guess = FONT_FILES[fontKey];
+  if (!guess) return null;
+  if (fs.existsSync(guess)) return guess;
+  return resolveFontFileViaFontconfig(FONT_FAMILIES[fontKey]);
+}
 
 // Add a burned-in text overlay to a completed video
 app.post('/api/overlay/:jobId', async (req, res) => {
@@ -296,13 +323,13 @@ app.post('/api/overlay/:jobId', async (req, res) => {
   if (!Number.isFinite(parsedFontSize) || parsedFontSize < 10 || parsedFontSize > 300) {
     return res.status(400).json({ error: 'fontSize must be a number between 10 and 300' });
   }
-  const fontFile = FONT_FILES[font];
-  if (!fontFile) {
+  if (!FONT_FILES[font]) {
     return res.status(400).json({ error: `font must be one of: ${Object.keys(FONT_FILES).join(', ')}` });
   }
-  if (!fs.existsSync(fontFile)) {
-    console.error(`Overlay font file missing: ${fontFile} (check nixpacks.toml aptPkgs)`);
-    return res.status(500).json({ error: `Font "${font}" is not installed on the server (missing ${fontFile})` });
+  const fontFile = getFontFile(font);
+  if (!fontFile) {
+    console.error(`Could not resolve a font file for "${font}" — checked ${FONT_FILES[font]} and fc-match for "${FONT_FAMILIES[font]}"`);
+    return res.status(500).json({ error: `Font "${font}" is not installed on the server` });
   }
 
   const workDir = os.tmpdir();
