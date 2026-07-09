@@ -197,6 +197,14 @@
       </select>
     </div>
     <div class="row">
+      <select id="captionFont">
+        <option value="sans">Sans</option>
+        <option value="serif">Serif</option>
+        <option value="display">Bold Display</option>
+      </select>
+      <input type="number" id="captionFontSize" value="42" min="10" max="300" style="width:80px;" title="Font size" />
+    </div>
+    <div class="row">
       <button class="secondary" id="addCaptionBtn" style="width:auto;">Add caption</button>
       <button class="secondary" id="downloadImageBtn" style="width:auto;">Download</button>
     </div>
@@ -333,22 +341,87 @@ function buildCard(item) {
     });
     actions.appendChild(downloadBtn);
 
+    let overlayForm = null;
     if (item.jobId) {
       const overlayBtn = document.createElement('button');
       overlayBtn.className = 'secondary';
       overlayBtn.textContent = 'Add text overlay';
-      overlayBtn.addEventListener('click', async () => {
-        const text = prompt('Text to burn onto the video:');
-        if (!text || !text.trim()) return;
 
-        overlayBtn.disabled = true;
-        overlayBtn.textContent = 'Rendering...';
+      overlayForm = document.createElement('div');
+      overlayForm.style.display = 'none';
+      overlayForm.style.marginTop = '8px';
+
+      const overlayText = document.createElement('textarea');
+      overlayText.placeholder = 'Text to burn onto the video';
+      overlayText.style.minHeight = '50px';
+      overlayForm.appendChild(overlayText);
+
+      const overlayRow = document.createElement('div');
+      overlayRow.className = 'row';
+      overlayRow.style.marginTop = '6px';
+
+      const overlayFont = document.createElement('select');
+      overlayFont.innerHTML = `
+        <option value="sans">Sans</option>
+        <option value="serif">Serif</option>
+        <option value="display">Bold Display</option>
+      `;
+      overlayRow.appendChild(overlayFont);
+
+      const overlaySize = document.createElement('input');
+      overlaySize.type = 'number';
+      overlaySize.value = '48';
+      overlaySize.min = '10';
+      overlaySize.max = '300';
+      overlaySize.style.width = '80px';
+      overlaySize.title = 'Font size';
+      overlayRow.appendChild(overlaySize);
+
+      overlayForm.appendChild(overlayRow);
+
+      const overlayBtnsRow = document.createElement('div');
+      overlayBtnsRow.className = 'row';
+      overlayBtnsRow.style.marginTop = '6px';
+
+      const overlaySubmit = document.createElement('button');
+      overlaySubmit.className = 'secondary';
+      overlaySubmit.style.width = 'auto';
+      overlaySubmit.textContent = 'Burn overlay';
+      overlayBtnsRow.appendChild(overlaySubmit);
+
+      const overlayCancel = document.createElement('button');
+      overlayCancel.className = 'secondary';
+      overlayCancel.style.width = 'auto';
+      overlayCancel.textContent = 'Cancel';
+      overlayCancel.addEventListener('click', () => {
+        overlayForm.style.display = 'none';
+        overlayText.value = '';
+      });
+      overlayBtnsRow.appendChild(overlayCancel);
+
+      overlayForm.appendChild(overlayBtnsRow);
+
+      overlayBtn.addEventListener('click', () => {
+        overlayForm.style.display = overlayForm.style.display === 'none' ? 'block' : 'none';
+      });
+
+      overlaySubmit.addEventListener('click', async () => {
+        const text = overlayText.value.trim();
+        if (!text) return;
+
+        overlaySubmit.disabled = true;
+        overlaySubmit.textContent = 'Rendering...';
         try {
           const backend = getBackendUrl();
           const res = await fetch(`${backend}/api/overlay/${item.jobId}`, {
             method: 'POST',
             headers: authHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ text: text.trim(), position: 'bottom' }),
+            body: JSON.stringify({
+              text,
+              position: 'bottom',
+              font: overlayFont.value,
+              fontSize: Number(overlaySize.value) || 48,
+            }),
           });
           if (!res.ok) {
             const errData = await res.json().catch(() => ({}));
@@ -361,19 +434,22 @@ function buildCard(item) {
           const newId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
           upsertHistoryItem({
             id: newId,
-            script: `${item.script} [+ text: "${text.trim()}"]`,
+            script: `${item.script} [+ text: "${text}"]`,
             jobId: item.jobId,
             status: 'done',
             videoUrl: blobUrl,
           });
+          overlayForm.style.display = 'none';
+          overlayText.value = '';
         } catch (err) {
           console.error(err);
           alert(err.message || 'Failed to add text overlay');
         } finally {
-          overlayBtn.disabled = false;
-          overlayBtn.textContent = 'Add text overlay';
+          overlaySubmit.disabled = false;
+          overlaySubmit.textContent = 'Burn overlay';
         }
       });
+
       actions.appendChild(overlayBtn);
     }
 
@@ -389,6 +465,7 @@ function buildCard(item) {
     actions.appendChild(removeBtn);
 
     card.appendChild(actions);
+    if (overlayForm) card.appendChild(overlayForm);
   }
 
   return card;
@@ -802,6 +879,8 @@ $('addCaptionBtn').addEventListener('click', async () => {
         imageBase64: currentImageBase64,
         caption,
         position: $('captionPosition').value,
+        font: $('captionFont').value,
+        fontSize: Number($('captionFontSize').value) || 42,
       }),
     });
     const data = await res.json();

@@ -268,16 +268,41 @@ function escapeDrawtext(text) {
     .replace(/%/g, '\\%');
 }
 
-const FONT_PATH = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf';
+// CSS-style family names for the image caption tool (rendered via sharp/librsvg, which resolves
+// families through the system's font stack — safe without needing exact file paths).
+const FONT_FAMILIES = { sans: 'DejaVu Sans', serif: 'DejaVu Serif', display: 'Oswald' };
+const FONT_CSS_FALLBACK = { sans: 'sans-serif', serif: 'serif', display: 'sans-serif' };
+
+// Exact file paths for the video overlay tool. ffmpeg's drawtext filter only resolves family
+// names (font=) when built with libfontconfig, which isn't guaranteed — fontfile= (needs only
+// libfreetype) is what's proven to work here, so we point straight at files installed by
+// nixpacks.toml's aptPkgs (fonts-dejavu-core, fonts-oswald).
+const FONT_FILES = {
+  sans: '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+  serif: '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf',
+  display: '/usr/share/fonts/truetype/oswald/Oswald-Bold.ttf',
+};
 
 // Add a burned-in text overlay to a completed video
 app.post('/api/overlay/:jobId', async (req, res) => {
   const { jobId } = req.params;
-  const { text, position = 'bottom', fontSize = 48 } = req.body;
+  const { text, position = 'bottom', fontSize = 48, font = 'sans' } = req.body;
 
   if (!JOB_ID_RE.test(jobId)) return res.status(400).json({ error: 'Invalid job ID' });
   if (!text || !text.trim()) {
     return res.status(400).json({ error: 'text is required' });
+  }
+  const parsedFontSize = Number(fontSize);
+  if (!Number.isFinite(parsedFontSize) || parsedFontSize < 10 || parsedFontSize > 300) {
+    return res.status(400).json({ error: 'fontSize must be a number between 10 and 300' });
+  }
+  const fontFile = FONT_FILES[font];
+  if (!fontFile) {
+    return res.status(400).json({ error: `font must be one of: ${Object.keys(FONT_FILES).join(', ')}` });
+  }
+  if (!fs.existsSync(fontFile)) {
+    console.error(`Overlay font file missing: ${fontFile} (check nixpacks.toml aptPkgs)`);
+    return res.status(500).json({ error: `Font "${font}" is not installed on the server (missing ${fontFile})` });
   }
 
   const workDir = os.tmpdir();
@@ -303,9 +328,9 @@ app.post('/api/overlay/:jobId', async (req, res) => {
     if (position === 'center') yExpr = '(h-text_h)/2';
 
     const drawtext = 'drawtext=' + [
-      `fontfile='${FONT_PATH}'`,
+      `fontfile='${escapeDrawtext(fontFile)}'`,
       `text='${escapeDrawtext(text.trim())}'`,
-      `fontsize=${fontSize}`,
+      `fontsize=${parsedFontSize}`,
       `fontcolor=white`,
       `x=(w-text_w)/2`,
       `y=${yExpr}`,
@@ -395,9 +420,17 @@ app.post('/api/image/generate', async (req, res) => {
 // Burn a text caption onto a base64 image using sharp (SVG text overlay composited on top)
 app.post('/api/image/caption', async (req, res) => {
   try {
-    const { imageBase64, caption, position = 'bottom', fontSize = 42 } = req.body;
+    const { imageBase64, caption, position = 'bottom', fontSize = 42, font = 'sans' } = req.body;
     if (!imageBase64) return res.status(400).json({ error: 'imageBase64 is required' });
     if (!caption || !caption.trim()) return res.status(400).json({ error: 'caption is required' });
+    const parsedFontSize = Number(fontSize);
+    if (!Number.isFinite(parsedFontSize) || parsedFontSize < 10 || parsedFontSize > 300) {
+      return res.status(400).json({ error: 'fontSize must be a number between 10 and 300' });
+    }
+    const fontFamily = FONT_FAMILIES[font];
+    if (!fontFamily) {
+      return res.status(400).json({ error: `font must be one of: ${Object.keys(FONT_FAMILIES).join(', ')}` });
+    }
 
     const inputBuffer = Buffer.from(imageBase64, 'base64');
     const image = sharp(inputBuffer);
@@ -406,7 +439,7 @@ app.post('/api/image/caption', async (req, res) => {
     const height = metadata.height || 1024;
 
     // Simple word-wrap: break caption into lines that roughly fit the image width
-    const maxCharsPerLine = Math.max(10, Math.floor(width / (fontSize * 0.55)));
+    const maxCharsPerLine = Math.max(10, Math.floor(width / (parsedFontSize * 0.55)));
     const words = caption.trim().split(/\s+/);
     const lines = [];
     let currentLine = '';
@@ -421,16 +454,17 @@ app.post('/api/image/caption', async (req, res) => {
     }
     if (currentLine) lines.push(currentLine);
 
-    const lineHeight = fontSize * 1.3;
-    const bandHeight = lines.length * lineHeight + fontSize * 0.8;
+    const lineHeight = parsedFontSize * 1.3;
+    const bandHeight = lines.length * lineHeight + parsedFontSize * 0.8;
     const bandY = position === 'top' ? 0 : height - bandHeight;
 
     const escapeXml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const svgFontFamily = `${fontFamily}, ${FONT_CSS_FALLBACK[font]}`;
 
     const textElements = lines
       .map((line, i) => {
-        const y = bandY + fontSize * 0.9 + i * lineHeight;
-        return `<text x="50%" y="${y}" font-family="Arial, sans-serif" font-size="${fontSize}" font-weight="bold" fill="white" text-anchor="middle" stroke="black" stroke-width="${fontSize * 0.06}" paint-order="stroke">${escapeXml(line)}</text>`;
+        const y = bandY + parsedFontSize * 0.9 + i * lineHeight;
+        return `<text x="50%" y="${y}" font-family="${escapeXml(svgFontFamily)}" font-size="${parsedFontSize}" font-weight="bold" fill="white" text-anchor="middle" stroke="black" stroke-width="${parsedFontSize * 0.06}" paint-order="stroke">${escapeXml(line)}</text>`;
       })
       .join('\n');
 
