@@ -538,7 +538,8 @@ function buildCard(item) {
   removeBtn.addEventListener('click', () => {
     const all = loadHistory().filter((h) => h.id !== item.id);
     saveHistory(all);
-    cardElements.delete(item.id);
+    // Don't delete from cardElements here — renderGrid()'s own cleanup loop needs to see this
+    // id still mapped to its element so it can actually detach the node, not just forget it.
     renderGrid();
   });
   actions.appendChild(removeBtn);
@@ -566,9 +567,13 @@ function renderGrid() {
     }
   });
 
-  // Remove any cached cards for items no longer in history
+  // Remove any cached cards for items no longer in history — deleting from the map alone
+  // doesn't detach the node from the page, so it was left behind as a ghost card.
   for (const id of [...cardElements.keys()]) {
-    if (!orderedIds.includes(id)) cardElements.delete(id);
+    if (!orderedIds.includes(id)) {
+      cardElements.get(id).el.remove();
+      cardElements.delete(id);
+    }
   }
 
   // Reorder DOM to match current newest-first order, without touching untouched nodes
