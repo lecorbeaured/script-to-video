@@ -84,6 +84,7 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
     gap: 12px;
+    align-items: start;
   }
   .card {
     background: var(--panel);
@@ -451,12 +452,12 @@ function buildCard(item) {
               fontSize: Number(overlaySize.value) || 48,
             }),
           });
-          if (!res.ok) {
-            const errData = await res.json().catch(() => ({}));
-            throw new Error(errData.error || 'Overlay render failed');
-          }
-          const blob = await res.blob();
-          const blobUrl = URL.createObjectURL(blob);
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || 'Overlay render failed');
+
+          // Persistent backend URL (not a blob: URL) so this survives a page refresh, same as
+          // regular generated videos.
+          const videoUrl = `${backend}/api/overlay/result/${data.overlayId}?key=${encodeURIComponent(getApiKey())}`;
 
           // Add as its own history entry so the original stays untouched
           const newId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -465,7 +466,7 @@ function buildCard(item) {
             script: `${item.script} [+ text: "${text}"]`,
             jobId: item.jobId,
             status: 'done',
-            videoUrl: blobUrl,
+            videoUrl,
           });
           overlayForm.style.display = 'none';
           overlayText.value = '';

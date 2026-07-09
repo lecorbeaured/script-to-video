@@ -310,6 +310,8 @@ function getFontFile(fontKey) {
   return resolveFontFileViaFontconfig(FONT_FAMILIES[fontKey]);
 }
 
+const overlayResults = {}; // overlayId -> { path, createdAt }
+
 // Add a burned-in text overlay to a completed video
 app.post('/api/overlay/:jobId', async (req, res) => {
   const { jobId } = req.params;
@@ -376,20 +378,29 @@ app.post('/api/overlay/:jobId', async (req, res) => {
         .save(outPath);
     });
 
-    // 4. Stream result back, then clean up
-    res.set('Content-Type', 'video/mp4');
-    const readStream = fs.createReadStream(outPath);
-    readStream.pipe(res);
-    readStream.on('close', () => {
-      fs.unlink(srcPath, () => {});
-      fs.unlink(outPath, () => {});
-    });
+    // 4. Keep the result around (like story videos) so the client can reference it by a stable
+    // URL that still works after a page refresh, instead of a one-shot stream.
+    const overlayId = crypto.randomBytes(8).toString('hex');
+    overlayResults[overlayId] = { path: outPath, createdAt: Date.now() };
+    fs.unlink(srcPath, () => {});
+    res.json({ overlayId });
   } catch (err) {
     console.error('overlay error:', err);
     fs.unlink(srcPath, () => {});
     fs.unlink(outPath, () => {});
     res.status(500).json({ error: err.message || 'Failed to add text overlay' });
   }
+});
+
+app.get('/api/overlay/result/:overlayId', (req, res) => {
+  const { overlayId } = req.params;
+  if (!JOB_ID_RE.test(overlayId)) return res.status(400).json({ error: 'Invalid overlay ID' });
+  const entry = overlayResults[overlayId];
+  if (!entry || !fs.existsSync(entry.path)) {
+    return res.status(404).json({ error: 'Overlay result not found (it may have expired)' });
+  }
+  res.set('Content-Type', 'video/mp4');
+  fs.createReadStream(entry.path).pipe(res);
 });
 
 // Poll job status
@@ -698,8 +709,8 @@ app.get('/api/story/video/:storyId', (req, res) => {
   fs.createReadStream(job.finalPath).pipe(res);
 });
 
-// storyJobs and musicFiles are in-memory and never otherwise pruned — sweep out anything
-// stale so long-running deployments don't leak temp files or grow their job maps forever.
+// storyJobs, musicFiles, and overlayResults are in-memory and never otherwise pruned — sweep
+// out anything stale so long-running deployments don't leak temp files or grow forever.
 const JOB_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function cleanupStaleJobs() {
@@ -716,6 +727,13 @@ function cleanupStaleJobs() {
     if (now - entry.uploadedAt > JOB_TTL_MS) {
       fs.unlink(entry.path, () => {});
       delete musicFiles[musicId];
+    }
+  }
+
+  for (const [overlayId, entry] of Object.entries(overlayResults)) {
+    if (now - entry.createdAt > JOB_TTL_MS) {
+      fs.unlink(entry.path, () => {});
+      delete overlayResults[overlayId];
     }
   }
 }
