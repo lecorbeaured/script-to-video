@@ -339,15 +339,20 @@ function buildCard(item) {
   statusLine.appendChild(statusText);
   card.appendChild(statusLine);
 
+  let overlayForm = null;
+
   if (item.status === 'done' && item.videoUrl) {
     const video = document.createElement('video');
     video.src = item.videoUrl;
     video.controls = true;
+    video.preload = 'metadata';
     card.appendChild(video);
+  }
 
-    const actions = document.createElement('div');
-    actions.className = 'card-actions';
+  const actions = document.createElement('div');
+  actions.className = 'card-actions';
 
+  if (item.status === 'done' && item.videoUrl) {
     const downloadBtn = document.createElement('button');
     downloadBtn.className = 'secondary';
     downloadBtn.textContent = 'Download';
@@ -372,7 +377,6 @@ function buildCard(item) {
     });
     actions.appendChild(downloadBtn);
 
-    let overlayForm = null;
     if (item.jobId) {
       const overlayBtn = document.createElement('button');
       overlayBtn.className = 'secondary';
@@ -483,21 +487,21 @@ function buildCard(item) {
 
       actions.appendChild(overlayBtn);
     }
-
-    const removeBtn = document.createElement('button');
-    removeBtn.className = 'secondary';
-    removeBtn.textContent = 'Remove';
-    removeBtn.addEventListener('click', () => {
-      const all = loadHistory().filter((h) => h.id !== item.id);
-      saveHistory(all);
-      cardElements.delete(item.id);
-      renderGrid();
-    });
-    actions.appendChild(removeBtn);
-
-    card.appendChild(actions);
-    if (overlayForm) card.appendChild(overlayForm);
   }
+
+  const removeBtn = document.createElement('button');
+  removeBtn.className = 'secondary';
+  removeBtn.textContent = 'Remove';
+  removeBtn.addEventListener('click', () => {
+    const all = loadHistory().filter((h) => h.id !== item.id);
+    saveHistory(all);
+    cardElements.delete(item.id);
+    renderGrid();
+  });
+  actions.appendChild(removeBtn);
+
+  card.appendChild(actions);
+  if (overlayForm) card.appendChild(overlayForm);
 
   return card;
 }
@@ -940,6 +944,23 @@ $('downloadImageBtn').addEventListener('click', () => {
   a.remove();
 });
 
+// Nothing resumes polling for a job after a page reload — anything still sitting in an
+// in-progress status on load is orphaned (the tab that was tracking it is gone), not actually
+// still processing. Relabel those on load instead of showing a stale status forever.
+function markOrphanedJobs() {
+  const items = loadHistory();
+  let changed = false;
+  items.forEach((item) => {
+    if (item.status !== 'done' && item.status !== 'error') {
+      item.status = 'error';
+      item.error = 'Interrupted (page was reloaded before this finished) — remove and try again.';
+      changed = true;
+    }
+  });
+  if (changed) saveHistory(items);
+}
+
+markOrphanedJobs();
 renderGrid();
 </script>
 </body>
