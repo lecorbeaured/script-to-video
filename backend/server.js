@@ -36,6 +36,18 @@ if (!API_KEY) {
   console.warn('WARNING: API_KEY is not set. Every request will be rejected with 401 until you set API_KEY in your environment / Railway variables.');
 }
 
+// Story jobs, uploaded music, and overlay results live here instead of os.tmpdir() so they can
+// survive a restart — but that only actually happens if DATA_DIR points at a mounted Railway
+// Volume (Railway's default filesystem is wiped on every redeploy, same as os.tmpdir()).
+const DATA_DIR = process.env.DATA_DIR || os.tmpdir();
+if (!process.env.DATA_DIR) {
+  console.warn('WARNING: DATA_DIR is not set — using the ephemeral default temp dir. Story jobs and uploaded files will NOT survive a restart/redeploy. Attach a Railway Volume and set DATA_DIR to its mount path for durability.');
+}
+const JOBS_DIR = path.join(DATA_DIR, 'jobs');
+const WORK_DIR = path.join(DATA_DIR, 'work');
+fs.mkdirSync(JOBS_DIR, { recursive: true });
+fs.mkdirSync(WORK_DIR, { recursive: true });
+
 // Every route except /api/health spends OpenRouter/ElevenLabs credit, so require a shared
 // secret. Accepted via the x-api-key header (used by JS fetch calls) or a ?key= query param
 // (needed for the <video> tag, which can't attach custom headers).
@@ -168,7 +180,7 @@ app.post('/api/music/upload', upload.single('music'), (req, res) => {
     return res.status(400).json({ error: 'No music file uploaded' });
   }
   const musicId = crypto.randomBytes(8).toString('hex');
-  const destPath = path.join(os.tmpdir(), `music-${musicId}.mp3`);
+  const destPath = path.join(WORK_DIR, `music-${musicId}.mp3`);
   fs.renameSync(req.file.path, destPath);
   musicFiles[musicId] = { path: destPath, uploadedAt: Date.now() };
   res.json({ musicId });
@@ -334,10 +346,11 @@ app.post('/api/overlay/:jobId', async (req, res) => {
     return res.status(500).json({ error: `Font "${font}" is not installed on the server` });
   }
 
-  const workDir = os.tmpdir();
   const uid = crypto.randomBytes(6).toString('hex');
-  const srcPath = path.join(workDir, `${jobId}-${uid}-src.mp4`);
-  const outPath = path.join(workDir, `${jobId}-${uid}-out.mp4`);
+  // Source pull is ephemeral (deleted right after use) so it can stay in tmpdir; the rendered
+  // result is what /api/overlay/result/:overlayId serves later, so it needs to survive a restart.
+  const srcPath = path.join(os.tmpdir(), `${jobId}-${uid}-src.mp4`);
+  const outPath = path.join(WORK_DIR, `${jobId}-${uid}-out.mp4`);
 
   try {
     // 1. Pull the source video from OpenRouter (auth attached server-side)
@@ -584,7 +597,28 @@ Output STRICTLY a JSON array, nothing else, no markdown code fences, no preamble
 });
 
 // ── Story Mode: Step 2 — generate all beats (video + voiceover), mux, and stitch ──
-const storyJobs = {}; // in-memory job store: storyId -> { status, beats: [{status}], finalPath, error, createdAt }
+// storyJobs is in-memory for fast access, but every meaningful change is also written to
+// JOBS_DIR so resumeInterruptedStoryJobs() (see bottom of file) can pick a job back up if the
+// process restarts mid-generation instead of leaving it to 404 forever.
+const storyJobs = {}; // storyId -> { status, beats: [{narration, visualPrompt, status}], finalPath, error, createdAt, model, aspectRatio, resolution, voiceId, musicId, musicWarning }
+
+function storyJobPath(storyId) {
+  return path.join(JOBS_DIR, `story-${storyId}.json`);
+}
+
+function saveStoryJobState(storyId) {
+  const job = storyJobs[storyId];
+  if (!job) return;
+  try {
+    fs.writeFileSync(storyJobPath(storyId), JSON.stringify(job));
+  } catch (err) {
+    console.error(`Failed to persist story job ${storyId}:`, err.message);
+  }
+}
+
+function deleteStoryJobState(storyId) {
+  fs.unlink(storyJobPath(storyId), () => {});
+}
 
 app.post('/api/story/generate', async (req, res) => {
   const { beats, model, aspectRatio, resolution, voiceId, musicId } = req.body;
@@ -596,115 +630,145 @@ app.post('/api/story/generate', async (req, res) => {
   const storyId = crypto.randomBytes(8).toString('hex');
   storyJobs[storyId] = {
     status: 'processing',
-    beats: beats.map(() => ({ status: 'pending' })),
+    beats: beats.map((b) => ({ narration: b.narration, visualPrompt: b.visualPrompt, status: 'pending' })),
     finalPath: null,
     error: null,
     createdAt: Date.now(),
+    model,
+    aspectRatio,
+    resolution,
+    voiceId,
+    musicId,
+    musicWarning: null,
   };
+  saveStoryJobState(storyId);
 
   res.json({ storyId });
 
   // Process in the background — the response above already returned the storyId
-  (async () => {
-    const workDir = os.tmpdir();
-    const beatFinalPaths = [];
+  runStoryGeneration(storyId).catch((err) => {
+    console.error(`Unhandled error running story ${storyId}:`, err);
+  });
+});
 
-    try {
-      for (let i = 0; i < beats.length; i++) {
-        const beat = beats[i];
-        try {
-          storyJobs[storyId].beats[i].status = 'generating video';
+// Runs (or resumes) a story job entirely from what's stored in storyJobs[storyId] / on disk, so
+// it can be called both for a fresh request and for a job recovered after a restart. Beats that
+// already have a finished file on disk (from before an interruption) are skipped instead of
+// being regenerated.
+async function runStoryGeneration(storyId) {
+  const job = storyJobs[storyId];
+  const { beats, model, aspectRatio, resolution, voiceId, musicId } = job;
+  const beatFinalPaths = [];
 
-          const videoPath = path.join(workDir, `${storyId}-beat${i}-video.mp4`);
-          await generateVideoAndWait(beat.visualPrompt, { model, aspectRatio, resolution }, videoPath);
+  try {
+    for (let i = 0; i < beats.length; i++) {
+      const beat = beats[i];
+      const finalBeatPath = path.join(WORK_DIR, `${storyId}-beat${i}-final.mp4`);
 
-          storyJobs[storyId].beats[i].status = 'generating voiceover';
-          const audioBuffer = await elevenLabsTTS(beat.narration, voiceId);
-          const audioPath = path.join(workDir, `${storyId}-beat${i}-audio.mp3`);
-          fs.writeFileSync(audioPath, audioBuffer);
-
-          storyJobs[storyId].beats[i].status = 'muxing';
-          const finalBeatPath = path.join(workDir, `${storyId}-beat${i}-final.mp4`);
-          await new Promise((resolve, reject) => {
-            ffmpeg(videoPath)
-              .input(audioPath)
-              .outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest'])
-              .on('error', reject)
-              .on('end', resolve)
-              .save(finalBeatPath);
-          });
-
-          beatFinalPaths.push(finalBeatPath);
-          storyJobs[storyId].beats[i].status = 'done';
-
-          fs.unlink(videoPath, () => {});
-          fs.unlink(audioPath, () => {});
-        } catch (beatErr) {
-          // Tag the beat number onto the error so it survives into the top-level catch below —
-          // otherwise a failure just says e.g. "content may have been filtered" with no way to
-          // tell which of several beats/prompts actually caused it.
-          storyJobs[storyId].beats[i].status = 'error';
-          throw new Error(`Beat ${i + 1}: ${beatErr.message}`);
-        }
+      if (job.beats[i].status === 'done' && fs.existsSync(finalBeatPath)) {
+        // Already completed before an interruption — reuse it instead of regenerating.
+        beatFinalPaths.push(finalBeatPath);
+        continue;
       }
 
-      // Concatenate all beats into one final video
-      const listPath = path.join(workDir, `${storyId}-concat-list.txt`);
-      const listContent = beatFinalPaths.map((p) => `file '${p}'`).join('\n');
-      fs.writeFileSync(listPath, listContent);
+      try {
+        job.beats[i].status = 'generating video';
+        saveStoryJobState(storyId);
 
-      const concatPath = path.join(workDir, `${storyId}-concat.mp4`);
-      await new Promise((resolve, reject) => {
-        ffmpeg()
-          .input(listPath)
-          .inputOptions(['-f concat', '-safe 0'])
-          .outputOptions(['-c copy'])
-          .on('error', reject)
-          .on('end', resolve)
-          .save(concatPath);
-      });
+        const videoPath = path.join(WORK_DIR, `${storyId}-beat${i}-video.mp4`);
+        await generateVideoAndWait(beat.visualPrompt, { model, aspectRatio, resolution }, videoPath);
 
-      let finalPath = concatPath;
+        job.beats[i].status = 'generating voiceover';
+        saveStoryJobState(storyId);
+        const audioBuffer = await elevenLabsTTS(beat.narration, voiceId);
+        const audioPath = path.join(WORK_DIR, `${storyId}-beat${i}-audio.mp3`);
+        fs.writeFileSync(audioPath, audioBuffer);
 
-      // Mix in background music if one was uploaded for this story
-      const musicPath = musicId ? musicFiles[musicId]?.path : null;
-      if (musicId && !musicPath) {
-        console.warn(`Music requested (musicId=${musicId}) but file not found — likely lost to a server restart/redeploy since upload. Skipping music.`);
-        storyJobs[storyId].musicWarning = 'Background music was uploaded but could not be found when generating (the server may have restarted between upload and generation) — video was created without music.';
-      }
-      if (musicPath && fs.existsSync(musicPath)) {
-        const withMusicPath = path.join(workDir, `${storyId}-final.mp4`);
+        job.beats[i].status = 'muxing';
+        saveStoryJobState(storyId);
         await new Promise((resolve, reject) => {
-          ffmpeg()
-            .input(concatPath)
-            .input(musicPath)
-            .complexFilter([
-              '[1:a]aloop=loop=-1:size=2e9,volume=0.15[bg]',
-              '[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]',
-            ])
-            .outputOptions(['-map 0:v', '-map [aout]', '-c:v copy', '-c:a aac', '-b:a 192k'])
+          ffmpeg(videoPath)
+            .input(audioPath)
+            .outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest'])
             .on('error', reject)
             .on('end', resolve)
-            .save(withMusicPath);
+            .save(finalBeatPath);
         });
-        finalPath = withMusicPath;
-        fs.unlink(concatPath, () => {});
-        fs.unlink(musicPath, () => {});
-        delete musicFiles[musicId];
+
+        beatFinalPaths.push(finalBeatPath);
+        job.beats[i].status = 'done';
+        saveStoryJobState(storyId);
+
+        fs.unlink(videoPath, () => {});
+        fs.unlink(audioPath, () => {});
+      } catch (beatErr) {
+        // Tag the beat number onto the error so it survives into the top-level catch below —
+        // otherwise a failure just says e.g. "content may have been filtered" with no way to
+        // tell which of several beats/prompts actually caused it.
+        job.beats[i].status = 'error';
+        saveStoryJobState(storyId);
+        throw new Error(`Beat ${i + 1}: ${beatErr.message}`);
       }
-
-      storyJobs[storyId].status = 'done';
-      storyJobs[storyId].finalPath = finalPath;
-
-      beatFinalPaths.forEach((p) => fs.unlink(p, () => {}));
-      fs.unlink(listPath, () => {});
-    } catch (err) {
-      console.error('story generate error:', err);
-      storyJobs[storyId].status = 'error';
-      storyJobs[storyId].error = err.message || 'Story generation failed';
     }
-  })();
-});
+
+    // Concatenate all beats into one final video
+    const listPath = path.join(WORK_DIR, `${storyId}-concat-list.txt`);
+    const listContent = beatFinalPaths.map((p) => `file '${p}'`).join('\n');
+    fs.writeFileSync(listPath, listContent);
+
+    const concatPath = path.join(WORK_DIR, `${storyId}-concat.mp4`);
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(listPath)
+        .inputOptions(['-f concat', '-safe 0'])
+        .outputOptions(['-c copy'])
+        .on('error', reject)
+        .on('end', resolve)
+        .save(concatPath);
+    });
+
+    let finalPath = concatPath;
+
+    // Mix in background music if one was uploaded for this story
+    const musicPath = musicId ? musicFiles[musicId]?.path : null;
+    if (musicId && !musicPath) {
+      console.warn(`Music requested (musicId=${musicId}) but file not found — likely lost to a server restart/redeploy since upload. Skipping music.`);
+      job.musicWarning = 'Background music was uploaded but could not be found when generating (the server may have restarted between upload and generation) — video was created without music.';
+    }
+    if (musicPath && fs.existsSync(musicPath)) {
+      const withMusicPath = path.join(WORK_DIR, `${storyId}-final.mp4`);
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(concatPath)
+          .input(musicPath)
+          .complexFilter([
+            '[1:a]aloop=loop=-1:size=2e9,volume=0.15[bg]',
+            '[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]',
+          ])
+          .outputOptions(['-map 0:v', '-map [aout]', '-c:v copy', '-c:a aac', '-b:a 192k'])
+          .on('error', reject)
+          .on('end', resolve)
+          .save(withMusicPath);
+      });
+      finalPath = withMusicPath;
+      fs.unlink(concatPath, () => {});
+      fs.unlink(musicPath, () => {});
+      delete musicFiles[musicId];
+    }
+
+    job.status = 'done';
+    job.finalPath = finalPath;
+    saveStoryJobState(storyId);
+
+    beatFinalPaths.forEach((p) => fs.unlink(p, () => {}));
+    fs.unlink(listPath, () => {});
+  } catch (err) {
+    console.error('story generate error:', err);
+    job.status = 'error';
+    job.error = err.message || 'Story generation failed';
+    saveStoryJobState(storyId);
+  }
+}
 
 app.get('/api/story/status/:storyId', (req, res) => {
   const job = storyJobs[req.params.storyId];
@@ -732,6 +796,7 @@ function cleanupStaleJobs() {
     if (now - job.createdAt > JOB_TTL_MS) {
       if (job.finalPath) fs.unlink(job.finalPath, () => {});
       delete storyJobs[storyId];
+      deleteStoryJobState(storyId);
     }
   }
 
@@ -751,6 +816,43 @@ function cleanupStaleJobs() {
 }
 
 setInterval(cleanupStaleJobs, 30 * 60 * 1000); // sweep every 30 min
+
+// On boot, pick back up any story job that was still 'processing' when the process died (a
+// redeploy, crash, etc.) — a job only ever sits in 'processing' while actively running, so
+// finding one in that state here means the run was interrupted, not that it's still going
+// somewhere else. Jobs already 'done' or 'error' are left alone.
+function resumeInterruptedStoryJobs() {
+  let files;
+  try {
+    files = fs.readdirSync(JOBS_DIR);
+  } catch (err) {
+    console.error('Failed to scan JOBS_DIR for interrupted story jobs:', err.message);
+    return;
+  }
+
+  for (const file of files) {
+    if (!file.startsWith('story-') || !file.endsWith('.json')) continue;
+    const storyId = file.slice('story-'.length, -'.json'.length);
+
+    let job;
+    try {
+      job = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, file), 'utf8'));
+    } catch (err) {
+      console.error(`Failed to read persisted story job ${file}:`, err.message);
+      continue;
+    }
+
+    if (job.status !== 'processing') continue;
+
+    console.log(`Resuming story job ${storyId} interrupted by a restart (last beat state preserved)`);
+    storyJobs[storyId] = job;
+    runStoryGeneration(storyId).catch((err) => {
+      console.error(`Resume failed for story ${storyId}:`, err);
+    });
+  }
+}
+
+resumeInterruptedStoryJobs();
 
 const PORT = process.env.PORT || 8787;
 app.listen(PORT, () => {
