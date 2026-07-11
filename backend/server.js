@@ -445,7 +445,7 @@ app.get('/api/overlay/result/:overlayId', (req, res) => {
 const voiceoverResults = {}; // voiceoverId -> { path, createdAt }
 
 app.post('/api/voiceover/apply', videoUpload.single('video'), async (req, res) => {
-  const { narration, voiceId } = req.body;
+  const { narration, voiceId, musicId } = req.body;
 
   if (!req.file) {
     return res.status(400).json({ error: 'video file is required' });
@@ -459,24 +459,45 @@ app.post('/api/voiceover/apply', videoUpload.single('video'), async (req, res) =
   const audioPath = path.join(os.tmpdir(), `voiceover-${uid}.mp3`);
   const outPath = path.join(WORK_DIR, `voiceover-${uid}-out.mp4`);
 
+  let musicWarning = null;
+  const musicPath = musicId ? musicFiles[musicId]?.path : null;
+  if (musicId && !musicPath) {
+    console.warn(`Music requested (musicId=${musicId}) but file not found — likely lost to a server restart/redeploy since upload. Skipping music.`);
+    musicWarning = 'Background music was uploaded but could not be found (the server may have restarted between upload and generation) — video was created without music.';
+  }
+
   try {
     const audioBuffer = await elevenLabsTTS(narration.trim(), voiceId);
     fs.writeFileSync(audioPath, audioBuffer);
 
     // Original audio is dropped entirely — the voiceover replaces it, trimmed/padded to
     // whichever of video or narration is shorter (same -shortest pattern Story Mode uses).
+    // If background music was supplied, mix it in under the voiceover (looped, reduced volume)
+    // rather than mapping the voiceover track directly.
     await new Promise((resolve, reject) => {
-      ffmpeg(req.file.path)
-        .input(audioPath)
-        .outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest'])
-        .on('error', reject)
-        .on('end', resolve)
-        .save(outPath);
+      const cmd = ffmpeg(req.file.path).input(audioPath);
+      if (musicPath && fs.existsSync(musicPath)) {
+        cmd
+          .input(musicPath)
+          .complexFilter([
+            '[2:a]aloop=loop=-1:size=2e9,volume=0.15[bg]',
+            '[1:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]',
+          ])
+          .outputOptions(['-map 0:v:0', '-map [aout]', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest']);
+      } else {
+        cmd.outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest']);
+      }
+      cmd.on('error', reject).on('end', resolve).save(outPath);
     });
+
+    if (musicPath) {
+      fs.unlink(musicPath, () => {});
+      delete musicFiles[musicId];
+    }
 
     const voiceoverId = crypto.randomBytes(8).toString('hex');
     voiceoverResults[voiceoverId] = { path: outPath, createdAt: Date.now() };
-    res.json({ voiceoverId });
+    res.json({ voiceoverId, musicWarning });
   } catch (err) {
     console.error('voiceover apply error:', err);
     fs.unlink(outPath, () => {});

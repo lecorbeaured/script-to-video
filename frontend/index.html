@@ -291,6 +291,13 @@
     </select>
     <button class="secondary" id="loadVoicesBtn" style="margin-top:0;">Load voices</button>
   </div>
+  <div class="row" style="margin-top:0;">
+    <div style="flex:1;">
+      <div class="hint" style="margin-top:0;">Background music (optional, mp3):</div>
+      <input type="file" id="voiceoverMusicFile" accept="audio/mpeg,audio/mp3" />
+      <div class="hint" id="voiceoverMusicStatus"></div>
+    </div>
+  </div>
   <button id="applyVoiceoverBtn">Apply Voiceover</button>
   <div class="status" id="voiceoverStatus"></div>
   <div id="voiceoverResultWrap" style="display:none; margin-top:12px;">
@@ -1041,6 +1048,36 @@ $('loadVoicesBtn').addEventListener('click', async () => {
   }
 });
 
+let voiceoverMusicId = null;
+
+$('voiceoverMusicFile').addEventListener('change', async () => {
+  const file = $('voiceoverMusicFile').files[0];
+  const musicStatus = $('voiceoverMusicStatus');
+  if (!file) return;
+
+  musicStatus.textContent = 'Uploading...';
+  musicStatus.style.color = 'var(--muted)';
+  try {
+    const backend = getBackendUrl();
+    const formData = new FormData();
+    formData.append('music', file);
+
+    const res = await fetch(`${backend}/api/music/upload`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: formData,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+
+    voiceoverMusicId = data.musicId;
+    musicStatus.textContent = `Uploaded: ${file.name}`;
+  } catch (err) {
+    musicStatus.textContent = err.message || 'Failed to upload music';
+    musicStatus.style.color = '#f87171';
+  }
+});
+
 $('applyVoiceoverBtn').addEventListener('click', async () => {
   const fileInput = $('voiceoverVideoFile');
   const narration = $('voiceoverNarration').value.trim();
@@ -1070,6 +1107,7 @@ $('applyVoiceoverBtn').addEventListener('click', async () => {
     formData.append('narration', narration);
     const voiceId = $('voiceoverVoice').value;
     if (voiceId) formData.append('voiceId', voiceId);
+    if (voiceoverMusicId) formData.append('musicId', voiceoverMusicId);
 
     const res = await fetch(`${backend}/api/voiceover/apply`, {
       method: 'POST',
@@ -1078,11 +1116,13 @@ $('applyVoiceoverBtn').addEventListener('click', async () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to apply voiceover');
+    voiceoverMusicId = null; // consumed server-side (or was never valid) either way
 
     const videoUrl = `${backend}/api/voiceover/result/${data.voiceoverId}?key=${encodeURIComponent(apiKey)}`;
     $('voiceoverResultVideo').src = videoUrl;
     $('voiceoverResultWrap').style.display = 'block';
-    voiceoverStatus.textContent = 'Done.';
+    voiceoverStatus.textContent = data.musicWarning ? `Done, but: ${data.musicWarning}` : 'Done.';
+    voiceoverStatus.style.color = data.musicWarning ? '#f59e0b' : 'var(--muted)';
 
     $('voiceoverDownloadBtn').onclick = async () => {
       const dlBtn = $('voiceoverDownloadBtn');
