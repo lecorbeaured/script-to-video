@@ -12,6 +12,7 @@ const multer = require('multer');
 const sharp = require('sharp');
 
 const upload = multer({ dest: os.tmpdir(), limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB cap
+const videoUpload = multer({ dest: os.tmpdir(), limits: { fileSize: 200 * 1024 * 1024 } }); // 200MB cap, for user-uploaded video
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -416,6 +417,66 @@ app.get('/api/overlay/result/:overlayId', (req, res) => {
   fs.createReadStream(entry.path).pipe(res);
 });
 
+// ── Voiceover: apply ElevenLabs narration to a user-uploaded video ──
+// Same result-by-id pattern as overlayResults: render once, persist to WORK_DIR, hand back an
+// id so the client gets a stable URL (works with <video src>, survives a page refresh) instead
+// of a one-shot stream.
+const voiceoverResults = {}; // voiceoverId -> { path, createdAt }
+
+app.post('/api/voiceover/apply', videoUpload.single('video'), async (req, res) => {
+  const { narration, voiceId } = req.body;
+
+  if (!req.file) {
+    return res.status(400).json({ error: 'video file is required' });
+  }
+  if (!narration || !narration.trim()) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: 'narration is required' });
+  }
+
+  const uid = crypto.randomBytes(6).toString('hex');
+  const audioPath = path.join(os.tmpdir(), `voiceover-${uid}.mp3`);
+  const outPath = path.join(WORK_DIR, `voiceover-${uid}-out.mp4`);
+
+  try {
+    const audioBuffer = await elevenLabsTTS(narration.trim(), voiceId);
+    fs.writeFileSync(audioPath, audioBuffer);
+
+    // Original audio is dropped entirely — the voiceover replaces it, trimmed/padded to
+    // whichever of video or narration is shorter (same -shortest pattern Story Mode uses).
+    await new Promise((resolve, reject) => {
+      ffmpeg(req.file.path)
+        .input(audioPath)
+        .outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest'])
+        .on('error', reject)
+        .on('end', resolve)
+        .save(outPath);
+    });
+
+    const voiceoverId = crypto.randomBytes(8).toString('hex');
+    voiceoverResults[voiceoverId] = { path: outPath, createdAt: Date.now() };
+    res.json({ voiceoverId });
+  } catch (err) {
+    console.error('voiceover apply error:', err);
+    fs.unlink(outPath, () => {});
+    res.status(500).json({ error: err.message || 'Failed to apply voiceover' });
+  } finally {
+    fs.unlink(req.file.path, () => {});
+    fs.unlink(audioPath, () => {});
+  }
+});
+
+app.get('/api/voiceover/result/:voiceoverId', (req, res) => {
+  const { voiceoverId } = req.params;
+  if (!JOB_ID_RE.test(voiceoverId)) return res.status(400).json({ error: 'Invalid voiceover ID' });
+  const entry = voiceoverResults[voiceoverId];
+  if (!entry || !fs.existsSync(entry.path)) {
+    return res.status(404).json({ error: 'Voiceover result not found (it may have expired)' });
+  }
+  res.set('Content-Type', 'video/mp4');
+  fs.createReadStream(entry.path).pipe(res);
+});
+
 // Poll job status
 app.get('/api/status/:jobId', async (req, res) => {
 
@@ -785,8 +846,8 @@ app.get('/api/story/video/:storyId', (req, res) => {
   fs.createReadStream(job.finalPath).pipe(res);
 });
 
-// storyJobs, musicFiles, and overlayResults are in-memory and never otherwise pruned — sweep
-// out anything stale so long-running deployments don't leak temp files or grow forever.
+// storyJobs, musicFiles, overlayResults, and voiceoverResults are in-memory and never otherwise
+// pruned — sweep out anything stale so long-running deployments don't leak temp files or grow forever.
 const JOB_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 function cleanupStaleJobs() {
@@ -811,6 +872,13 @@ function cleanupStaleJobs() {
     if (now - entry.createdAt > JOB_TTL_MS) {
       fs.unlink(entry.path, () => {});
       delete overlayResults[overlayId];
+    }
+  }
+
+  for (const [voiceoverId, entry] of Object.entries(voiceoverResults)) {
+    if (now - entry.createdAt > JOB_TTL_MS) {
+      fs.unlink(entry.path, () => {});
+      delete voiceoverResults[voiceoverId];
     }
   }
 }
