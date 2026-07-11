@@ -285,6 +285,12 @@
   <p class="hint" style="margin-top:0;">Upload your own video and replace its audio with an ElevenLabs voiceover reading your narration.</p>
   <input type="file" id="voiceoverVideoFile" accept="video/*" />
   <textarea id="voiceoverNarration" placeholder="Write the narration to read over your video..." style="margin-top:12px; min-height:100px;"></textarea>
+  <div class="row" style="margin-top:0;">
+    <select id="voiceoverVoice" style="flex:1;">
+      <option value="">Default voice</option>
+    </select>
+    <button class="secondary" id="loadVoicesBtn" style="margin-top:0;">Load voices</button>
+  </div>
   <button id="applyVoiceoverBtn">Apply Voiceover</button>
   <div class="status" id="voiceoverStatus"></div>
   <div id="voiceoverResultWrap" style="display:none; margin-top:12px;">
@@ -1008,6 +1014,33 @@ $('downloadImageBtn').addEventListener('click', () => {
 });
 
 // ── Voiceover Your Video ──
+$('loadVoicesBtn').addEventListener('click', async () => {
+  const loadBtn = $('loadVoicesBtn');
+  const select = $('voiceoverVoice');
+  loadBtn.disabled = true;
+  loadBtn.textContent = 'Loading...';
+  try {
+    const backend = getBackendUrl();
+    const res = await fetch(`${backend}/api/voices`, { headers: authHeaders() });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load voices');
+
+    select.innerHTML = '<option value="">Default voice</option>';
+    (data.voices || []).forEach((v) => {
+      const opt = document.createElement('option');
+      opt.value = v.voice_id;
+      opt.textContent = v.name;
+      select.appendChild(opt);
+    });
+  } catch (err) {
+    console.error(err);
+    alert(err.message || 'Failed to load voices');
+  } finally {
+    loadBtn.disabled = false;
+    loadBtn.textContent = 'Load voices';
+  }
+});
+
 $('applyVoiceoverBtn').addEventListener('click', async () => {
   const fileInput = $('voiceoverVideoFile');
   const narration = $('voiceoverNarration').value.trim();
@@ -1035,6 +1068,8 @@ $('applyVoiceoverBtn').addEventListener('click', async () => {
     const formData = new FormData();
     formData.append('video', fileInput.files[0]);
     formData.append('narration', narration);
+    const voiceId = $('voiceoverVoice').value;
+    if (voiceId) formData.append('voiceId', voiceId);
 
     const res = await fetch(`${backend}/api/voiceover/apply`, {
       method: 'POST',

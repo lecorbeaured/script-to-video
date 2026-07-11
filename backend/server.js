@@ -102,8 +102,9 @@ async function chatCompletion(systemPrompt, userPrompt, model = DEFAULT_TEXT_MOD
 }
 
 // Generate narration audio via ElevenLabs, returns a Buffer of mp3 bytes
-async function elevenLabsTTS(text, voiceId = ELEVENLABS_VOICE_ID) {
-  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+async function elevenLabsTTS(text, voiceId) {
+  const resolvedVoiceId = voiceId || ELEVENLABS_VOICE_ID; // falsy (incl. '') falls back to default
+  const r = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${resolvedVoiceId}`, {
     method: 'POST',
     headers: {
       'xi-api-key': ELEVENLABS_API_KEY,
@@ -196,6 +197,26 @@ app.get('/api/models', async (req, res) => {
   } catch (err) {
     console.error('models error:', err);
     res.status(500).json({ error: 'Failed to fetch models' });
+  }
+});
+
+// List available ElevenLabs voices for the voice picker
+app.get('/api/voices', async (req, res) => {
+  try {
+    const r = await fetch('https://api.elevenlabs.io/v1/voices', {
+      headers: { 'xi-api-key': ELEVENLABS_API_KEY },
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      console.error('ElevenLabs voices error:', data);
+      return res.status(r.status).json({ error: data.detail?.message || 'Failed to fetch voices' });
+    }
+    // Trim to just what the picker needs
+    const voices = (data.voices || []).map((v) => ({ voice_id: v.voice_id, name: v.name }));
+    res.json({ voices });
+  } catch (err) {
+    console.error('voices error:', err);
+    res.status(500).json({ error: 'Failed to fetch voices' });
   }
 });
 
