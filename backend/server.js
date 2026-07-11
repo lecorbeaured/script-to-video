@@ -444,6 +444,17 @@ app.get('/api/overlay/result/:overlayId', (req, res) => {
 // of a one-shot stream.
 const voiceoverResults = {}; // voiceoverId -> { path, createdAt }
 
+function getMediaDuration(filePath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, data) => {
+      if (err) return reject(err);
+      const duration = data?.format?.duration;
+      if (!duration) return reject(new Error(`Could not read duration of ${filePath}`));
+      resolve(duration);
+    });
+  });
+}
+
 app.post('/api/voiceover/apply', videoUpload.single('video'), async (req, res) => {
   const { narration, voiceId, musicId } = req.body;
 
@@ -470,12 +481,19 @@ app.post('/api/voiceover/apply', videoUpload.single('video'), async (req, res) =
     const audioBuffer = await elevenLabsTTS(narration.trim(), voiceId);
     fs.writeFileSync(audioPath, audioBuffer);
 
-    // Original audio is dropped entirely — the voiceover replaces it, trimmed/padded to
-    // whichever of video or narration is shorter (same -shortest pattern Story Mode uses).
-    // If background music was supplied, mix it in under the voiceover (looped, reduced volume)
-    // rather than mapping the voiceover track directly.
+    // The narration always plays in full — never truncated. Output length is pinned to the
+    // narration's duration; the video loops (via -stream_loop on the input, cheap with stream
+    // copy — no re-encode) to cover it if the narration runs longer than the source video, or
+    // is simply cut short at that point if the video was already longer.
+    const narrationDuration = await getMediaDuration(audioPath);
+
+    // Original video audio is dropped entirely — the voiceover replaces it. If background
+    // music was supplied, mix it in under the voiceover (looped, reduced volume) instead of
+    // mapping the voiceover track directly.
     await new Promise((resolve, reject) => {
-      const cmd = ffmpeg(req.file.path).input(audioPath);
+      const cmd = ffmpeg()
+        .input(req.file.path).inputOptions(['-stream_loop -1'])
+        .input(audioPath);
       if (musicPath && fs.existsSync(musicPath)) {
         cmd
           .input(musicPath)
@@ -483,9 +501,9 @@ app.post('/api/voiceover/apply', videoUpload.single('video'), async (req, res) =
             '[2:a]aloop=loop=-1:size=2e9,volume=0.15[bg]',
             '[1:a][bg]amix=inputs=2:duration=first:dropout_transition=2[aout]',
           ])
-          .outputOptions(['-map 0:v:0', '-map [aout]', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest']);
+          .outputOptions(['-map 0:v:0', '-map [aout]', '-c:v copy', '-c:a aac', '-b:a 192k', '-t', String(narrationDuration)]);
       } else {
-        cmd.outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest']);
+        cmd.outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-t', String(narrationDuration)]);
       }
       cmd.on('error', reject).on('end', resolve).save(outPath);
     });
